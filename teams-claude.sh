@@ -596,6 +596,167 @@ TERMINAL_JS = r"""
 })();
 """
 
+CLIPBOARD_FIX_JS = r"""
+(function installTeamsClipboardFix() {
+  if (window.__teamsClipboardFixHandler) {
+    document.removeEventListener("copy", window.__teamsClipboardFixHandler, true);
+    console.log("[clipboard-fix] previous handler removed");
+  }
+
+  function blobToPng(blob) {
+    if (blob.type === "image/png") return Promise.resolve(blob);
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const objUrl = URL.createObjectURL(blob);
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        canvas.toBlob((b) => {
+          URL.revokeObjectURL(objUrl);
+          b ? resolve(b) : reject(new Error("canvas.toBlob returned null"));
+        }, "image/png");
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(objUrl);
+        reject(new Error("image decode failed"));
+      };
+      img.src = objUrl;
+    });
+  }
+
+  function blobToDataUri(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("FileReader failed"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function imgToDataUri(imgEl) {
+    const src = imgEl.src || imgEl.getAttribute("src");
+    if (!src) return null;
+    if (src.startsWith("data:")) return { png: null, dataUri: src, viaCanvas: false };
+
+    try {
+      const response = await fetch(src);
+      if (!response.ok) throw new Error("fetch HTTP " + response.status);
+      const raw = await response.blob();
+      const png = await blobToPng(raw);
+      const dataUri = await blobToDataUri(png);
+      return { png, dataUri, viaCanvas: false };
+    } catch (fetchErr) {
+      try {
+        if (!imgEl.complete || !imgEl.naturalWidth) {
+          throw new Error("image not loaded in DOM (naturalWidth=" + imgEl.naturalWidth + ")");
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = imgEl.naturalWidth;
+        canvas.height = imgEl.naturalHeight;
+        canvas.getContext("2d").drawImage(imgEl, 0, 0);
+        const dataUri = canvas.toDataURL("image/png");
+        const png = await new Promise((res, rej) =>
+          canvas.toBlob((b) => (b ? res(b) : rej(new Error("toBlob null"))), "image/png")
+        );
+        return { png, dataUri, viaCanvas: true };
+      } catch (canvasErr) {
+        const composite = new Error(
+          "fetch failed (" + fetchErr.message + "), canvas fallback failed (" + canvasErr.message + ")"
+        );
+        composite.canvasErr = canvasErr;
+        composite.fetchErr = fetchErr;
+        throw composite;
+      }
+    }
+  }
+
+  const handler = (event) => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+
+    const range = sel.getRangeAt(0);
+    const container = document.createElement("div");
+    container.appendChild(range.cloneContents());
+    const imgEls = Array.from(container.querySelectorAll("img"));
+    const liveImgs = Array.from(document.querySelectorAll("img"));
+    if (imgEls.length === 0) return;
+
+    const text = sel.toString();
+    const isRichMix = text.trim().length > 1;
+
+    (async () => {
+      try {
+        const resolved = [];
+        let failedCount = 0;
+        for (const clonedImg of imgEls) {
+          const clonedSrc = clonedImg.src || clonedImg.getAttribute("src");
+          const liveImg =
+            liveImgs.find((el) => (el.src || el.getAttribute("src")) === clonedSrc) || clonedImg;
+          try {
+            const r = await imgToDataUri(liveImg);
+            if (r && r.dataUri) {
+              clonedImg.src = r.dataUri;
+              resolved.push(r);
+              console.log(
+                "[clipboard-fix]   img OK " +
+                  (r.viaCanvas ? "(canvas)" : "(fetch)") +
+                  " src=" +
+                  (clonedSrc || "").slice(0, 60)
+              );
+            }
+          } catch (e) {
+            failedCount++;
+            console.warn(
+              "[clipboard-fix]   img FAIL src=" + (clonedSrc || "").slice(0, 60) + " :",
+              e.message
+            );
+          }
+        }
+
+        if (resolved.length === 0) {
+          console.warn("[clipboard-fix] no images could be embedded, abort");
+          return;
+        }
+
+        const enrichedHtml = container.innerHTML;
+        const firstPng = resolved.find((r) => r.png && r.png.size)?.png;
+
+        const itemPayload = {
+          "text/html": new Blob([enrichedHtml], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        };
+        if (!isRichMix && firstPng) {
+          itemPayload["image/png"] = firstPng;
+        }
+
+        await navigator.clipboard.write([new ClipboardItem(itemPayload)]);
+        console.log(
+          "[clipboard-fix] v4 enriched: mode=" +
+            (isRichMix ? "RICH(no image/png)" : "IMAGE(with image/png)") +
+            ", " +
+            resolved.length +
+            "/" +
+            imgEls.length +
+            " img embedded, " +
+            failedCount +
+            " failed, html=" +
+            enrichedHtml.length +
+            " chars"
+        );
+      } catch (err) {
+        console.error("[clipboard-fix] failed:", err);
+      }
+    })();
+  };
+
+  window.__teamsClipboardFixHandler = handler;
+  document.addEventListener("copy", handler, true);
+  console.log("[clipboard-fix] v4 installed (smart mode: RICH for text+img, IMAGE for img-only)");
+})();
+"""
+
 async def inject():
     msg_id = 0
 
@@ -653,6 +814,15 @@ async def inject():
             print("Terminal injection failed:", desc)
         else:
             print("Injection successful!")
+
+        # 5. Inject clipboard fix (text+image copy enrichment for paste into other apps)
+        print("Injecting clipboard fix...")
+        result = await evaluate(ws, CLIPBOARD_FIX_JS)
+        if "exceptionDetails" in result.get("result", {}):
+            desc = result["result"]["exceptionDetails"].get("exception", {}).get("description", "unknown")
+            print("Clipboard fix injection failed:", desc)
+        else:
+            print("Clipboard fix injected!")
 
 asyncio.run(inject())
 PYEOF
