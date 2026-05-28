@@ -6,7 +6,7 @@ Embed a Claude Code terminal directly inside Microsoft Teams for Linux.
 
 ## How it works
 
-1. The script launches Teams for Linux with `--remote-debugging-port=9222` (Chrome DevTools Protocol)
+1. The script launches Teams for Linux with `--remote-debugging-port=9333` (Chrome DevTools Protocol)
 2. It downloads [xterm.js](https://xtermjs.org/) and injects it into the Teams UI via CDP `Runtime.evaluate` (bypasses Content Security Policy)
 3. The xterm.js terminal connects via WebSocket to [Claude Code UI](https://github.com/siteboon/claudecodeui) which manages PTY sessions
 4. Claude Code starts with a system prompt that tells it it's running inside Teams and can control the UI via the [chrome-devtools MCP](https://github.com/nicedoc/teams-for-linux)
@@ -23,7 +23,7 @@ Embed a Claude Code terminal directly inside Microsoft Teams for Linux.
      "mcpServers": {
        "chrome-devtools": {
          "command": "npx",
-         "args": ["chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9222"]
+         "args": ["chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9333"]
        }
      }
    }

@@ -9,7 +9,7 @@
 #        "mcpServers": {
 #          "chrome-devtools": {
 #            "command": "npx",
-#            "args": ["chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9222"]
+#            "args": ["chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9333"]
 #          }
 #        }
 #
@@ -22,7 +22,7 @@
 #   Ctrl+`  — Toggle terminal panel
 #   Ctrl+V  — Paste (supports images from clipboard)
 
-DEBUG_PORT=9222
+DEBUG_PORT=9333
 export CLAUDECODEUI_PORT=${CLAUDECODEUI_PORT:-3001}
 CLAUDE_EXTRA_FLAGS=""
 FLATPAK_APP="com.github.IsmaelMartinez.teams_for_linux"
@@ -90,7 +90,7 @@ echo "Teams launched (PID $TEAMS_PID), injection will happen in background..."
 
 # Write MCP config to connect chrome-devtools to Teams debug port
 cat > /tmp/teams-mcp.json << 'MCPEOF'
-{"mcpServers":{"chrome-devtools":{"command":"npx","args":["chrome-devtools-mcp@latest","--browserUrl","http://127.0.0.1:9222"]}}}
+{"mcpServers":{"chrome-devtools":{"command":"npx","args":["chrome-devtools-mcp@latest","--browserUrl","http://127.0.0.1:9333"]}}}
 MCPEOF
 
 # Copy system prompt next to MCP config so the PTY can find it
