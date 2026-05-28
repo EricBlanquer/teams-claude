@@ -100,8 +100,9 @@ cp "$SCRIPT_DIR/teams-claude.md" /tmp/teams-claude-prompt.md
 # Write Teams-specific bashrc for manual Claude relaunches after Ctrl+C
 cat > /tmp/teams-bashrc << BASHEOF
 [ -f ~/.bashrc ] && source ~/.bashrc
-cd "$SCRIPT_DIR"
-alias claude='~/.local/bin/claude $CLAUDE_EXTRA_FLAGS --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md --continue || ~/.local/bin/claude $CLAUDE_EXTRA_FLAGS --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md'
+cd "\$(cat /tmp/teams-claude-cwd 2>/dev/null)" 2>/dev/null || cd ~
+PROMPT_COMMAND='printf "%s" "\$PWD" > /tmp/teams-claude-cwd'
+alias claude='~/.local/bin/claude $CLAUDE_EXTRA_FLAGS --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md'
 BASHEOF
 
 # Wait for Teams and inject in background so Teams is not blocked
@@ -444,6 +445,12 @@ TERMINAL_JS = r"""
             statusDot.style.background = '#a6e3a1';
             fitTerminal();
             if (isOpen) scrollChatToBottom();
+            var pathSetup = 'export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node/ 2>/dev/null | tail -1)/bin:$PATH" 2>/dev/null';
+            var cdCmd = 'cd "$(cat /tmp/teams-claude-cwd 2>/dev/null)" 2>/dev/null || cd ~';
+            var cwdWatcher = '(MISS=0; while sleep 2; do PID=$(pgrep -nf "claude.*--mcp-config" 2>/dev/null); if [ -n "$PID" ]; then readlink /proc/$PID/cwd > /tmp/teams-claude-cwd 2>/dev/null; MISS=0; else MISS=$((MISS+1)); [ $MISS -gt 5 ] && break; fi; done &)';
+            var claudeCmd = newConversation
+                ? '~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md'
+                : '(~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md --continue || ~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md)';
             ws.send(JSON.stringify({
                 type: 'init',
                 projectPath: '__TEAMS_DIR__',
@@ -451,7 +458,7 @@ TERMINAL_JS = r"""
                 hasSession: false,
                 provider: 'plain-shell',
                 cols: term.cols, rows: term.rows,
-                initialCommand: 'export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node/ 2>/dev/null | tail -1)/bin:$PATH" 2>/dev/null; cd __TEAMS_DIR__ && ' + (newConversation ? '~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md' : '(~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md --continue || ~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md)') + '; exec bash --rcfile /tmp/teams-bashrc',
+                initialCommand: pathSetup + '; ' + cdCmd + ' && ' + cwdWatcher + ' && ' + claudeCmd + '; exec bash --rcfile /tmp/teams-bashrc',
                 isPlainShell: true, skipPermissions: false
             }));
         };
