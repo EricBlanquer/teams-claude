@@ -307,15 +307,26 @@ TERMINAL_JS = r"""
         }, 350);
     }
 
+    var lastCols = 0, lastRows = 0;
+    var fitTimer = null;
     function fitTerminal() {
         if (fitAddon && term) {
             try {
                 fitAddon.fit();
-                if (ws && ws.readyState === 1) {
+                if (ws && ws.readyState === 1 && (term.cols !== lastCols || term.rows !== lastRows)) {
+                    lastCols = term.cols;
+                    lastRows = term.rows;
                     ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
                 }
             } catch(e) {}
         }
+    }
+    function scheduleFit() {
+        if (fitTimer) clearTimeout(fitTimer);
+        fitTimer = setTimeout(function() {
+            fitTimer = null;
+            if (!resizing) fitTerminal();
+        }, 120);
     }
 
     function togglePanel() {
@@ -379,7 +390,6 @@ TERMINAL_JS = r"""
             var newH = Math.max(120, startH + (startY - ev.clientY));
             panel.style.height = newH + 'px';
             panelHeight = newH;
-            fitTerminal();
         }
         function onUp() {
             resizing = false;
@@ -388,6 +398,7 @@ TERMINAL_JS = r"""
             localStorage.setItem('claude-terminal-height', panelHeight);
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
+            fitTerminal();
         }
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
@@ -401,7 +412,7 @@ TERMINAL_JS = r"""
         }
     }, true);
 
-    var resizeObserver = new ResizeObserver(function() { fitTerminal(); });
+    var resizeObserver = new ResizeObserver(function() { scheduleFit(); });
     resizeObserver.observe(termContainer);
 
     function connectShell(newConversation) {
