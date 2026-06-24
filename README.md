@@ -43,6 +43,31 @@ Embed a Claude Code terminal directly inside Microsoft Teams for Linux.
 CLAUDECODEUI_PORT=4000 ./teams-claude.sh
 ```
 
+## Desktop integration (replace the Teams launcher)
+
+To make the Teams menu entry and autostart launch the script instead of plain Teams, point their `Exec` to it:
+
+- `~/.local/share/applications/teams-for-linux.desktop` — menu launcher override
+- `~/.config/autostart/teams-for-linux.desktop` — autostart at login
+
+```ini
+Exec=/home/eric/teams-claude/teams-claude-skip-permissions.sh %U
+```
+
+**Cinnamon gotcha**: the Cinnamon menu (cinnamon-menus) resolves duplicate desktop-file IDs to the *last* `<AppDir>` in the menu definition, which makes `/usr/share/applications` win over the local override. Fix it by declaring the local directory as the last root-level `<AppDir>` in `~/.config/menus/cinnamon-applications.menu`:
+
+```xml
+<MergeFile type="parent">/etc/xdg/menus/cinnamon-applications.menu</MergeFile>
+<AppDir>/home/eric/.local/share/applications</AppDir>
+```
+
+Then restart Cinnamon (`Ctrl+Alt+Esc`). Verify which file the menu resolves with:
+
+```bash
+dbus-send --session --print-reply --dest=org.Cinnamon /org/Cinnamon org.Cinnamon.Eval \
+  string:'Cinnamon.AppSystem.get_default().lookup_app("teams-for-linux.desktop").get_app_info().get_commandline()'
+```
+
 ## Keyboard shortcuts (inside Teams)
 
 | Shortcut | Action |
