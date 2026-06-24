@@ -181,7 +181,7 @@ webgl_js = download(WEBGL_ADDON_URL)
 print("Downloaded xterm.js + addons + CSS")
 
 TERMINAL_JS = r"""
-(function() {
+(function claudeTermInit() {
     if (document.getElementById('claude-terminal-panel')) return;
 
     var CCUI_HOST = 'ws://localhost:__CCUI_PORT__/shell';
@@ -191,7 +191,13 @@ TERMINAL_JS = r"""
         Array.from(document.querySelectorAll('[class*="AppLayoutArea"]')).find(function(el) {
             return getComputedStyle(el).gridArea.includes('main');
         });
-    if (!mainArea) { console.error('[Claude Terminal] Could not find main area'); return; }
+    if (!mainArea) {
+        var n = (window.__claudeTermRetry = (window.__claudeTermRetry || 0) + 1);
+        if (n <= 120) { setTimeout(claudeTermInit, 500); }
+        else { console.error('[Claude Terminal] Could not find main area after retries'); }
+        return;
+    }
+    window.__claudeTermRetry = 0;
 
     mainArea.style.display = 'flex';
     mainArea.style.flexDirection = 'column';
@@ -778,17 +784,23 @@ CLIPBOARD_FIX_JS = r"""
 async def inject():
     msg_id = 0
 
-    async def evaluate(ws, code):
+    async def send_cmd(ws, method, params=None):
         nonlocal msg_id
         msg_id += 1
-        await ws.send(json.dumps({
-            "id": msg_id,
-            "method": "Runtime.evaluate",
-            "params": {"expression": code, "awaitPromise": False, "returnByValue": False}
-        }))
-        return json.loads(await ws.recv())
+        my_id = msg_id
+        await ws.send(json.dumps({"id": my_id, "method": method, "params": params or {}}))
+        # Read until the matching response arrives, ignoring async CDP events
+        # (Page.* notifications) that may be interleaved on the same socket.
+        while True:
+            resp = json.loads(await ws.recv())
+            if resp.get("id") == my_id:
+                return resp
 
-    async with websockets.connect(PAGE_WS) as ws:
+    async def evaluate(ws, code):
+        return await send_cmd(ws, "Runtime.evaluate",
+                              {"expression": code, "awaitPromise": False, "returnByValue": False})
+
+    async def inject_all(ws):
         # 1. Inject xterm.js via Runtime.evaluate (bypasses CSP)
         print("Injecting xterm.js...")
         result = await evaluate(ws, xterm_js)
@@ -815,7 +827,7 @@ async def inject():
         # 3. Inject CSS as a <style> tag
         print("Injecting xterm CSS...")
         css_escaped = json.dumps(xterm_css)
-        await evaluate(ws, f"(function(){{ var s=document.createElement('style'); s.textContent={css_escaped}; document.head.appendChild(s); }})()")
+        await evaluate(ws, f"(function(){{ var s=document.createElement('style'); s.textContent={css_escaped}; (document.head||document.documentElement).appendChild(s); }})()")
 
         # 4. Inject terminal UI
         print("Injecting terminal UI...")
@@ -841,6 +853,25 @@ async def inject():
             print("Clipboard fix injection failed:", desc)
         else:
             print("Clipboard fix injected!")
+
+    async with websockets.connect(PAGE_WS, max_size=None) as ws:
+        # Enable the Page domain so we are notified when Teams reloads the webview
+        # (e.g. the tray "Refresh" entry, Ctrl+R) and can re-inject everything.
+        await send_cmd(ws, "Page.enable")
+        await inject_all(ws)
+        print("Watching for page reloads (auto re-injection enabled)...")
+        while True:
+            try:
+                raw = await ws.recv()
+            except Exception:
+                break
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if msg.get("method") == "Page.loadEventFired":
+                print("Teams reloaded — re-injecting terminal...")
+                await inject_all(ws)
 
 asyncio.run(inject())
 PYEOF
