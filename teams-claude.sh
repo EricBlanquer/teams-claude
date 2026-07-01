@@ -692,26 +692,128 @@ CLIPBOARD_FIX_JS = r"""
     }
   }
 
+  function isScreenReaderOnly(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const st = getComputedStyle(el);
+    if (st.position !== "absolute" && st.position !== "fixed") return false;
+    const clipZero = /^rect\(0px,\s*0px,\s*0px,\s*0px\)$/.test(st.clip || "");
+    const pathHidden = st.clipPath === "inset(50%)" || st.clipPath === "inset(100%)";
+    if (!clipZero && !pathHidden) return false;
+    if ((parseFloat(st.width) || 0) > 1 || (parseFloat(st.height) || 0) > 1) return false;
+    if (el.matches("a[href], button, input, select, textarea, [tabindex]")) return false;
+    if (el.querySelector("a[href], button, input, select, textarea, [tabindex]")) return false;
+    return true;
+  }
+
+  // Teams renders a screen-reader-only node (Fluent VisuallyHidden clip recipe)
+  // for every message summary, reaction and system announcement. These stay in
+  // the layout tree, so the browser serializes them into the selection, doubling
+  // the text on paste - including middle-click paste (X11 PRIMARY), which never
+  // fires a 'copy' event and so cannot be intercepted in JS. The only lever that
+  // removes them from PRIMARY is taking them out of layout (display:none). A
+  // persistent, body-scoped observer tags every sr-only node so one stylesheet
+  // rule hides them; the copy handler reuses the same attribute to drop them from
+  // its rich-HTML payload. Keyed on the computed clip recipe (not volatile
+  // roles/classes) so it covers every current and future announcement, and it
+  // skips the injected terminal subtree whose xterm rows churn every frame.
+  (function installSrOnlyStripper() {
+    const HIDE_ATTR = "data-cc-sronly";
+    const STYLE_ID = "cc-sronly-style";
+    const TERMINAL_SEL = "#claude-terminal-panel";
+
+    if (window.__teamsSrOnlyObserver) window.__teamsSrOnlyObserver.disconnect();
+
+    if (!document.getElementById(STYLE_ID)) {
+      const style = document.createElement("style");
+      style.id = STYLE_ID;
+      style.textContent = "[" + HIDE_ATTR + "]{display:none !important;}";
+      (document.head || document.documentElement).appendChild(style);
+    }
+
+    const seen = new WeakSet();
+    function tag(el) {
+      if (seen.has(el)) return;
+      seen.add(el);
+      if (isScreenReaderOnly(el)) el.setAttribute(HIDE_ATTR, "1");
+    }
+    function scan(root) {
+      if (root.nodeType !== 1) return;
+      if (root.hasAttribute("data-cc-clone") || root.closest(TERMINAL_SEL)) return;
+      tag(root);
+      const els = root.querySelectorAll("*");
+      for (let i = 0; i < els.length; i++) tag(els[i]);
+    }
+
+    const observer = new MutationObserver((records) => {
+      for (let i = 0; i < records.length; i++) {
+        const target = records[i].target;
+        if (target && target.nodeType === 1 && target.closest && target.closest(TERMINAL_SEL)) {
+          continue;
+        }
+        const added = records[i].addedNodes;
+        for (let j = 0; j < added.length; j++) {
+          if (added[j].nodeType === 1) scan(added[j]);
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.__teamsSrOnlyObserver = observer;
+
+    scan(document.body);
+    console.log("[clipboard-fix] sr-only stripper installed (clip-recipe signature, observer)");
+  })();
+
   const handler = (event) => {
     const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
 
     const range = sel.getRangeAt(0);
+
+    // The sr-only stripper persistently tags every hidden announcement node
+    // (summaries, reactions, system notes) with data-cc-sronly on the live DOM.
+    // cloneContents copies that attribute, so removing it here drops all sr-only
+    // doubling from both the text/plain and text/html payloads.
     const container = document.createElement("div");
+    container.setAttribute("data-cc-clone", "1");
     container.appendChild(range.cloneContents());
+    container.querySelectorAll("[data-cc-sronly]").forEach((n) => n.remove());
+
     const imgEls = Array.from(container.querySelectorAll("img"));
+
+    // Clean plain text via offscreen innerText (respects line breaks, excludes removed nodes),
+    // then trim every line and drop blank lines for a compact, gap-free transcript.
+    container.style.position = "absolute";
+    container.style.left = "-99999px";
+    container.style.top = "0";
+    document.body.appendChild(container);
+    const cleanText = container.innerText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .join("\n");
+
+    // Synchronous clipboard payload: clean text + html, no doubling, no async race
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", cleanText);
+    event.clipboardData.setData("text/html", container.innerHTML);
+
+    if (imgEls.length === 0) {
+      container.remove();
+      console.log("[clipboard-fix] v5 clean text copied (no images), " + cleanText.length + " chars");
+      return;
+    }
+
+    const isRichMix = cleanText.length > 1;
     const liveImgs = Array.from(document.querySelectorAll("img"));
-    if (imgEls.length === 0) return;
 
-    const text = sel.toString();
-    const isRichMix = text.trim().length > 1;
-
+    // Async enrichment: embed images as data URIs and overwrite the clipboard
     (async () => {
       try {
         const resolved = [];
         let failedCount = 0;
         for (const clonedImg of imgEls) {
           const clonedSrc = clonedImg.src || clonedImg.getAttribute("src");
+          if (!clonedSrc || clonedSrc.startsWith("data:")) continue;
           const liveImg =
             liveImgs.find((el) => (el.src || el.getAttribute("src")) === clonedSrc) || clonedImg;
           try {
@@ -736,7 +838,7 @@ CLIPBOARD_FIX_JS = r"""
         }
 
         if (resolved.length === 0) {
-          console.warn("[clipboard-fix] no images could be embedded, abort");
+          console.warn("[clipboard-fix] no images embedded, keeping sync remote-src html");
           return;
         }
 
@@ -745,7 +847,7 @@ CLIPBOARD_FIX_JS = r"""
 
         const itemPayload = {
           "text/html": new Blob([enrichedHtml], { type: "text/html" }),
-          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/plain": new Blob([cleanText], { type: "text/plain" }),
         };
         if (!isRichMix && firstPng) {
           itemPayload["image/png"] = firstPng;
@@ -753,7 +855,7 @@ CLIPBOARD_FIX_JS = r"""
 
         await navigator.clipboard.write([new ClipboardItem(itemPayload)]);
         console.log(
-          "[clipboard-fix] v4 enriched: mode=" +
+          "[clipboard-fix] v5 enriched: mode=" +
             (isRichMix ? "RICH(no image/png)" : "IMAGE(with image/png)") +
             ", " +
             resolved.length +
@@ -766,14 +868,16 @@ CLIPBOARD_FIX_JS = r"""
             " chars"
         );
       } catch (err) {
-        console.error("[clipboard-fix] failed:", err);
+        console.error("[clipboard-fix] enrich failed:", err);
+      } finally {
+        container.remove();
       }
     })();
   };
 
   window.__teamsClipboardFixHandler = handler;
   document.addEventListener("copy", handler, true);
-  console.log("[clipboard-fix] v4 installed (smart mode: RICH for text+img, IMAGE for img-only)");
+  console.log("[clipboard-fix] v6 installed (persistent sr-only stripper for PRIMARY + copy, async image embed)");
 })();
 """
 
