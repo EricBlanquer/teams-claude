@@ -33,6 +33,16 @@ When typing messages in the Teams compose box, Teams uses a rich text editor wit
   3. Use `press_key` with Ctrl+V to paste
   4. Take a screenshot to verify the content before sending
   5. Press Enter to send
+- For FORMATTED messages (tables, lists, bold, etc.), do NOT use `writeText` (plain text) — Teams would show the raw markdown/source literally (ugly). Instead write **rich HTML** to the clipboard so Teams' rich editor renders it on paste:
+  ```js
+  const html = '<b>Title</b><table border="1"><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>';
+  const plain = 'Title\nA | B\n1 | 2';
+  await navigator.clipboard.write([new ClipboardItem({
+    'text/html': new Blob([html], {type: 'text/html'}),
+    'text/plain': new Blob([plain], {type: 'text/plain'})
+  })]);
+  ```
+  Then Ctrl+V. Use real HTML tags (`<table>`, `<ul>`, `<b>`, `<code>`), not markdown. `writeText` is fine only for plain unformatted text.
 - Only use `type_text` for very short texts or when paste doesn't work.
 - Verify with a screenshot before sending.
 
