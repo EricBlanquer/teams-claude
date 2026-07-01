@@ -166,7 +166,6 @@ XTERM_JS_URL = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js
 XTERM_CSS_URL = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
 FIT_ADDON_URL = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"
 WEB_LINKS_ADDON_URL = "https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"
-WEBGL_ADDON_URL = "https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"
 
 def download(url):
     with urllib.request.urlopen(url) as r:
@@ -177,7 +176,6 @@ xterm_js = download(XTERM_JS_URL)
 xterm_css = download(XTERM_CSS_URL)
 fit_js = download(FIT_ADDON_URL)
 web_links_js = download(WEB_LINKS_ADDON_URL)
-webgl_js = download(WEBGL_ADDON_URL)
 print("Downloaded xterm.js + addons + CSS")
 
 TERMINAL_JS = r"""
@@ -447,8 +445,6 @@ TERMINAL_JS = r"""
         });
         term.loadAddon(webLinksAddon);
         term.open(termContainer);
-        try { var webglAddon = new window.WebglAddon.WebglAddon(); term.loadAddon(webglAddon); }
-        catch(e) { console.warn('[Claude Terminal] WebGL not available, using DOM renderer'); }
         fitTerminal();
 
         try { ws = new WebSocket(CCUI_HOST); }
@@ -816,7 +812,7 @@ async def inject():
             return
 
         # 2b. Inject extra addons
-        for addon_name, addon_js in [("web-links", web_links_js), ("webgl", webgl_js)]:
+        for addon_name, addon_js in [("web-links", web_links_js)]:
             print(f"Injecting {addon_name} addon...")
             result = await evaluate(ws, addon_js)
             if "exceptionDetails" in result.get("result", {}):
