@@ -531,7 +531,7 @@ TERMINAL_JS = r"""
             tempWs.onmessage = function(event) {
                 try {
                     var msg = JSON.parse(event.data);
-                    if (msg.type === 'output' && msg.data && msg.data.indexOf('IMG_SAVED') !== -1) {
+                    if (msg.type === 'output' && msg.data && msg.data.indexOf('IMG_SAVED') !== -1 && !done) {
                         done = true;
                         tempWs.send(JSON.stringify({ type: 'input', data: 'exit\n' }));
                         setTimeout(function() { tempWs.close(); }, 200);
