@@ -611,7 +611,7 @@ TERMINAL_JS = r"""
         });
     }
 
-    connectShell();
+    connectShell(true);
     console.log('[Claude Terminal] Injected. Ctrl+` to toggle.');
 })();
 """
