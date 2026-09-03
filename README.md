@@ -1,33 +1,23 @@
-# teams-claude
+# Teams Codex terminal
 
-Embed a Claude Code terminal directly inside Microsoft Teams for Linux.
+Embed a Codex CLI terminal directly inside Microsoft Teams for Linux.
 
-![Teams with Claude Terminal](https://raw.githubusercontent.com/ebmusic/teams-claude/main/screenshot.png)
+![Teams with Codex Terminal](https://raw.githubusercontent.com/ebmusic/teams-claude/main/screenshot.png)
 
 ## How it works
 
 1. The script launches Teams for Linux with `--remote-debugging-port=9333` (Chrome DevTools Protocol)
 2. It downloads [xterm.js](https://xtermjs.org/) and injects it into the Teams UI via CDP `Runtime.evaluate` (bypasses Content Security Policy)
-3. The xterm.js terminal connects via WebSocket to [Claude Code UI](https://github.com/siteboon/claudecodeui) which manages PTY sessions
-4. Claude Code starts with a system prompt that tells it it's running inside Teams and can control the UI via the [chrome-devtools MCP](https://github.com/nicedoc/teams-for-linux)
-5. Claude can read conversations, type messages, take screenshots, and interact with the Teams UI
+3. The xterm.js terminal connects via WebSocket to [Claude Code UI](https://github.com/siteboon/claudecodeui), which provides the PTY session
+4. [Codex CLI](https://developers.openai.com/codex/cli/) starts with Teams-specific developer instructions and a per-session [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) configuration targeting port 9333
+5. Codex can read conversations, type messages, take screenshots, and interact with the Teams UI
 
 ## Prerequisites
 
 1. **Teams for Linux** (deb or flatpak): https://github.com/nicedoc/teams-for-linux/releases
 2. **Claude Code UI** (WebSocket PTY backend): https://github.com/siteboon/claudecodeui
-3. **Claude Code CLI**: `~/.local/bin/claude`
-4. **Chrome DevTools MCP** configured in `~/.claude/settings.json`:
-   ```json
-   {
-     "mcpServers": {
-       "chrome-devtools": {
-         "command": "npx",
-         "args": ["chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9333"]
-       }
-     }
-   }
-   ```
+3. **Codex CLI** available as `codex` on `PATH`
+4. **Node.js/npm** so the launcher can run `chrome-devtools-mcp` through `npx`
 5. **Python 3** with the `websockets` module (`pip install websockets`)
 
 ## Usage
@@ -36,7 +26,7 @@ Embed a Claude Code terminal directly inside Microsoft Teams for Linux.
 # Normal mode
 ./teams-claude.sh
 
-# Bypass permissions (no confirmation prompts)
+# Bypass approvals and sandboxing (no confirmation prompts)
 ./teams-claude-skip-permissions.sh
 
 # Custom Claude Code UI port
@@ -80,19 +70,21 @@ dbus-send --session --print-reply --dest=org.Cinnamon /org/Cinnamon org.Cinnamon
 
 | File | Description |
 |------|-------------|
-| `teams-claude.sh` | Main script — launches Teams, injects xterm.js terminal, starts Claude Code |
-| `teams-claude-skip-permissions.sh` | Shortcut — runs the main script with `--dangerously-skip-permissions` |
-| `teams-claude.md` | System prompt for Claude (Teams formatting rules, behavior guidelines) |
+| `teams-claude.sh` | Main script — launches Teams, injects the xterm.js terminal, and starts Codex; the legacy filename is kept for desktop-entry compatibility |
+| `teams-claude-skip-permissions.sh` | Shortcut — runs Codex with `--dangerously-bypass-approvals-and-sandbox` |
+| `teams-codex.md` | Developer instructions for Codex (Teams formatting rules and behavior guidelines) |
 
 ## Features
 
 - Terminal panel embedded in the Teams conversation area (not an overlay)
 - Resizable by dragging the top edge
 - Panel height saved in localStorage across sessions
-- Image paste from clipboard (saved to `/tmp/` and path sent to Claude)
+- Image paste from clipboard (saved to `/tmp/` and path sent to Codex)
 - Graceful Teams shutdown (saves window position/size)
 - Auto-detection of Teams installation (deb or flatpak)
 - Background injection (Teams is usable while the terminal loads)
-- **Dedicated project directory** — Claude runs from `~/teams-claude` with its own `CLAUDE.md` for Teams-specific instructions
-- **Session continuity** — uses `--continue` to resume the previous conversation automatically
-- **Relaunch after Ctrl+C** — typing `claude` in the terminal relaunches with all Teams flags and session resume (via a bash alias in `/tmp/teams-bashrc`)
+- **Dedicated project directory** — Codex starts from `~/teams-claude` with Teams-specific developer instructions
+- **Session controls** — the `+` button starts a new conversation and reconnect resumes the latest Codex session for the current directory
+- **Relaunch after Ctrl+C** — typing `codex` in the terminal relaunches with the Teams prompt and MCP configuration through `/tmp/teams-codex`
+
+The skip-permissions launcher disables Codex approvals and sandboxing. Use it only in an environment where that level of access is intended.

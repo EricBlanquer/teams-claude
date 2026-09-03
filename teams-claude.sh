@@ -1,17 +1,10 @@
 #!/bin/bash
-# teams-claude.sh — Launch Teams for Linux with an embedded Claude Code terminal.
+# teams-claude.sh — Launch Teams for Linux with an embedded Codex terminal.
 #
 # Prerequisites:
 #   1. Teams for Linux (deb or flatpak): https://github.com/IsmaelMartinez/teams-for-linux?tab=readme-ov-file#installation
 #   2. Claude Code UI (backend): https://github.com/siteboon/claudecodeui?tab=readme-ov-file#quick-start
-#   3. Claude Code CLI: ~/.local/bin/claude
-#   4. Chrome DevTools MCP configured in ~/.claude/settings.json:
-#        "mcpServers": {
-#          "chrome-devtools": {
-#            "command": "npx",
-#            "args": ["chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9333"]
-#          }
-#        }
+#   3. Codex CLI available on PATH
 #
 # Usage:
 #   ./teams-claude.sh                              # Normal mode
@@ -24,11 +17,11 @@
 
 DEBUG_PORT=9333
 export CLAUDECODEUI_PORT=${CLAUDECODEUI_PORT:-3001}
-CLAUDE_EXTRA_FLAGS=""
+CODEX_EXTRA_FLAGS=""
 FLATPAK_APP="com.github.IsmaelMartinez.teams_for_linux"
 
-if [ "$1" = "--dangerously-skip-permissions" ]; then
-    CLAUDE_EXTRA_FLAGS="--dangerously-skip-permissions"
+if [ "$1" = "--dangerously-skip-permissions" ] || [ "$1" = "--dangerously-bypass-approvals-and-sandbox" ]; then
+    CODEX_EXTRA_FLAGS="--dangerously-bypass-approvals-and-sandbox"
 fi
 
 # Detect Teams for Linux installation (deb or flatpak)
@@ -88,21 +81,26 @@ $TEAMS_CMD &>/dev/null &
 TEAMS_PID=$!
 echo "Teams launched (PID $TEAMS_PID), injection will happen in background..."
 
-# Write MCP config to connect chrome-devtools to Teams debug port
-cat > /tmp/teams-mcp.json << 'MCPEOF'
-{"mcpServers":{"chrome-devtools":{"command":"npx","args":["chrome-devtools-mcp@latest","--browserUrl","http://127.0.0.1:9333"]}}}
-MCPEOF
-
-# Copy system prompt next to MCP config so the PTY can find it
+# Prepare the Codex prompt and launcher used inside the PTY. Inline configuration
+# overrides the user's regular Chrome MCP so this session controls Teams on port 9333.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cp "$SCRIPT_DIR/teams-claude.md" /tmp/teams-claude-prompt.md
+cp "$SCRIPT_DIR/teams-codex.md" /tmp/teams-codex-prompt.md
+cat > /tmp/teams-codex << CODEXEOF
+#!/bin/bash
+exec codex $CODEX_EXTRA_FLAGS \
+    -c 'mcp_servers.chrome-devtools.command="npx"' \
+    -c 'mcp_servers.chrome-devtools.args=["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:$DEBUG_PORT"]' \
+    -c "developer_instructions=\$(cat /tmp/teams-codex-prompt.md)" \
+    "\$@"
+CODEXEOF
+chmod 700 /tmp/teams-codex
 
-# Write Teams-specific bashrc for manual Claude relaunches after Ctrl+C
-cat > /tmp/teams-bashrc << BASHEOF
+# Write Teams-specific bashrc for manual Codex relaunches after Ctrl+C
+cat > /tmp/teams-codex-bashrc << BASHEOF
 [ -f ~/.bashrc ] && source ~/.bashrc
-cd "\$(cat /tmp/teams-claude-cwd 2>/dev/null)" 2>/dev/null || cd ~
-PROMPT_COMMAND='printf "%s" "\$PWD" > /tmp/teams-claude-cwd'
-alias claude='~/.local/bin/claude $CLAUDE_EXTRA_FLAGS --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md'
+cd "\$(cat /tmp/teams-codex-cwd 2>/dev/null)" 2>/dev/null || cd ~
+PROMPT_COMMAND='printf "%s" "\$PWD" > /tmp/teams-codex-cwd'
+alias codex='/tmp/teams-codex'
 BASHEOF
 
 # Wait for Teams and inject in background so Teams is not blocked
@@ -144,7 +142,7 @@ echo "Injecting terminal panel..."
 # Inject via Chrome DevTools Protocol
 # Strategy: load xterm.js and fit addon via Runtime.evaluate (bypasses CSP),
 # then inject the terminal UI code.
-python3 - "$PAGE_WS" "$CLAUDE_EXTRA_FLAGS" "$SCRIPT_DIR" << 'PYEOF'
+python3 - "$PAGE_WS" "$SCRIPT_DIR" << 'PYEOF'
 import json
 import asyncio
 import sys
@@ -159,8 +157,7 @@ except ImportError:
     import websockets
 
 PAGE_WS = sys.argv[1]
-CLAUDE_EXTRA_FLAGS = sys.argv[2] if len(sys.argv) > 2 else ""
-TEAMS_DIR = sys.argv[3] if len(sys.argv) > 3 else os.path.expanduser("~")
+TEAMS_DIR = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~")
 
 XTERM_JS_URL = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"
 XTERM_CSS_URL = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
@@ -179,8 +176,8 @@ web_links_js = download(WEB_LINKS_ADDON_URL)
 print("Downloaded xterm.js + addons + CSS")
 
 TERMINAL_JS = r"""
-(function claudeTermInit() {
-    if (document.getElementById('claude-terminal-panel')) return;
+(function codexTermInit() {
+    if (document.getElementById('codex-terminal-panel')) return;
 
     var CCUI_HOST = 'ws://localhost:__CCUI_PORT__/shell';
 
@@ -190,18 +187,18 @@ TERMINAL_JS = r"""
             return getComputedStyle(el).gridArea.includes('main');
         });
     if (!mainArea) {
-        var n = (window.__claudeTermRetry = (window.__claudeTermRetry || 0) + 1);
-        if (n <= 120) { setTimeout(claudeTermInit, 500); }
-        else { console.error('[Claude Terminal] Could not find main area after retries'); }
+        var n = (window.__codexTermRetry = (window.__codexTermRetry || 0) + 1);
+        if (n <= 120) { setTimeout(codexTermInit, 500); }
+        else { console.error('[Codex Terminal] Could not find main area after retries'); }
         return;
     }
-    window.__claudeTermRetry = 0;
+    window.__codexTermRetry = 0;
 
     mainArea.style.display = 'flex';
     mainArea.style.flexDirection = 'column';
     mainArea.style.overflow = 'hidden';
     Array.from(mainArea.children).forEach(function(child) {
-        if (child.id === 'claude-terminal-panel') return;
+        if (child.id === 'codex-terminal-panel') return;
         if (child.offsetHeight > 50) {
             child.style.flex = '1';
             child.style.minHeight = '0';
@@ -211,7 +208,7 @@ TERMINAL_JS = r"""
 
     // --- Build UI ---
     var panel = document.createElement('div');
-    panel.id = 'claude-terminal-panel';
+    panel.id = 'codex-terminal-panel';
     panel.style.cssText =
         'height:0;flex-shrink:0;' +
         'background:#1e1e2e;border-top:2px solid #6c5ce7;' +
@@ -226,7 +223,7 @@ TERMINAL_JS = r"""
         'font-family:"Cascadia Code","Fira Code",Consolas,monospace;';
 
     var titleSpan = document.createElement('span');
-    titleSpan.textContent = 'Claude Terminal';
+    titleSpan.textContent = 'Codex Terminal';
     titleSpan.style.fontWeight = 'bold';
 
     var statusDot = document.createElement('span');
@@ -266,7 +263,7 @@ TERMINAL_JS = r"""
     header.appendChild(btnContainer);
 
     var termContainer = document.createElement('div');
-    termContainer.id = 'claude-term-container';
+    termContainer.id = 'codex-term-container';
     termContainer.style.cssText = 'flex:1;overflow:hidden;';
 
     // Resize handle (top edge of panel)
@@ -282,9 +279,9 @@ TERMINAL_JS = r"""
     mainArea.appendChild(panel);
 
     var toggleBtn = document.createElement('div');
-    toggleBtn.id = 'claude-terminal-toggle';
+    toggleBtn.id = 'codex-terminal-toggle';
     toggleBtn.textContent = '>';
-    toggleBtn.title = 'Claude Terminal (Ctrl+`)';
+    toggleBtn.title = 'Codex Terminal (Ctrl+`)';
     toggleBtn.style.cssText =
         'position:fixed;bottom:8px;right:12px;width:32px;height:32px;' +
         'background:#6c5ce7;color:white;border-radius:50%;' +
@@ -294,7 +291,7 @@ TERMINAL_JS = r"""
     document.body.appendChild(toggleBtn);
 
     var isOpen = false;
-    var panelHeight = parseInt(localStorage.getItem('claude-terminal-height')) || 350;
+    var panelHeight = parseInt(localStorage.getItem('codex-terminal-height') || localStorage.getItem('claude-terminal-height')) || 350;
     var term = null;
     var fitAddon = null;
     var ws = null;
@@ -304,7 +301,7 @@ TERMINAL_JS = r"""
             if (!mainArea) return;
             mainArea.querySelectorAll('*').forEach(function(el) {
                 var s = getComputedStyle(el);
-                if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 200 && el.id !== 'claude-term-container') {
+                if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 200 && el.id !== 'codex-term-container') {
                     el.scrollTop = el.scrollHeight;
                 }
             });
@@ -399,7 +396,7 @@ TERMINAL_JS = r"""
             resizing = false;
             resizeHandle.style.background = 'transparent';
             panel.style.transition = 'height 0.3s ease';
-            localStorage.setItem('claude-terminal-height', panelHeight);
+            localStorage.setItem('codex-terminal-height', panelHeight);
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
             fitTerminal();
@@ -459,11 +456,11 @@ TERMINAL_JS = r"""
             fitTerminal();
             if (isOpen) scrollChatToBottom();
             var pathSetup = 'export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node/ 2>/dev/null | tail -1)/bin:$PATH" 2>/dev/null';
-            var cdCmd = 'cd "$(cat /tmp/teams-claude-cwd 2>/dev/null)" 2>/dev/null || cd ~';
-            var cwdWatcher = '(MISS=0; while sleep 2; do PID=$(pgrep -nf "claude.*--mcp-config" 2>/dev/null); if [ -n "$PID" ]; then readlink /proc/$PID/cwd > /tmp/teams-claude-cwd 2>/dev/null; MISS=0; else MISS=$((MISS+1)); [ $MISS -gt 5 ] && break; fi; done &)';
-            var claudeCmd = newConversation
-                ? '~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md'
-                : '(~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md --continue || ~/.local/bin/claude __CLAUDE_EXTRA_FLAGS__ --mcp-config /tmp/teams-mcp.json --append-system-prompt-file /tmp/teams-claude-prompt.md)';
+            var cdCmd = 'cd "$(cat /tmp/teams-codex-cwd 2>/dev/null)" 2>/dev/null || cd ~';
+            var cwdWatcher = '(MISS=0; while sleep 2; do PID=$(pgrep -nf "codex.*mcp_servers.chrome-devtools" 2>/dev/null); if [ -n "$PID" ]; then readlink /proc/$PID/cwd > /tmp/teams-codex-cwd 2>/dev/null; MISS=0; else MISS=$((MISS+1)); [ $MISS -gt 5 ] && break; fi; done &)';
+            var codexCmd = newConversation
+                ? '/tmp/teams-codex'
+                : '(/tmp/teams-codex resume --last || /tmp/teams-codex)';
             ws.send(JSON.stringify({
                 type: 'init',
                 projectPath: '__TEAMS_DIR__',
@@ -471,7 +468,7 @@ TERMINAL_JS = r"""
                 hasSession: false,
                 provider: 'plain-shell',
                 cols: term.cols, rows: term.rows,
-                initialCommand: pathSetup + '; ' + cdCmd + ' && ' + cwdWatcher + ' && ' + claudeCmd + '; exec bash --rcfile /tmp/teams-bashrc',
+                initialCommand: pathSetup + '; ' + cdCmd + ' && ' + cwdWatcher + ' && ' + codexCmd + '; exec bash --rcfile /tmp/teams-codex-bashrc',
                 isPlainShell: true, skipPermissions: false
             }));
         };
@@ -520,12 +517,12 @@ TERMINAL_JS = r"""
     reconnectBtn.onclick = function(e) { e.stopPropagation(); connectShell(); };
     newConvBtn.onclick = function(e) { e.stopPropagation(); connectShell(true); };
 
-    // Image paste: decode and write to disk via temp shell, then send path to Claude
+    // Image paste: decode and write to disk via temp shell, then send path to Codex
     function saveImageAndSendPath(blob) {
         var reader = new FileReader();
         reader.onload = function() {
             var base64 = reader.result.split(',')[1];
-            var filename = '/tmp/claude-paste-' + Date.now() + '.png';
+            var filename = '/tmp/codex-paste-' + Date.now() + '.png';
             var tempWs = new WebSocket(CCUI_HOST);
             var done = false;
             tempWs.onmessage = function(event) {
@@ -535,7 +532,7 @@ TERMINAL_JS = r"""
                         done = true;
                         tempWs.send(JSON.stringify({ type: 'input', data: 'exit\n' }));
                         setTimeout(function() { tempWs.close(); }, 200);
-                        // Insert image path at Claude's prompt
+                        // Insert image path at Codex's prompt
                         if (ws && ws.readyState === 1) {
                             ws.send(JSON.stringify({ type: 'input', data: filename + ' ' }));
                         }
@@ -612,7 +609,7 @@ TERMINAL_JS = r"""
     }
 
     connectShell(true);
-    console.log('[Claude Terminal] Injected. Ctrl+` to toggle.');
+    console.log('[Codex Terminal] Injected. Ctrl+` to toggle.');
 })();
 """
 
@@ -719,7 +716,7 @@ CLIPBOARD_FIX_JS = r"""
   (function installSrOnlyStripper() {
     const HIDE_ATTR = "data-cc-sronly";
     const STYLE_ID = "cc-sronly-style";
-    const TERMINAL_SEL = "#claude-terminal-panel";
+    const TERMINAL_SEL = "#codex-terminal-panel";
 
     if (window.__teamsSrOnlyObserver) window.__teamsSrOnlyObserver.disconnect();
 
@@ -931,13 +928,9 @@ async def inject():
 
         # 4. Inject terminal UI
         print("Injecting terminal UI...")
-        final_js = TERMINAL_JS.replace("__CLAUDE_EXTRA_FLAGS__", CLAUDE_EXTRA_FLAGS)
-        final_js = final_js.replace("__TEAMS_DIR__", TEAMS_DIR)
+        final_js = TERMINAL_JS.replace("__TEAMS_DIR__", TEAMS_DIR)
         final_js = final_js.replace("__USER_HOME__", os.path.expanduser("~"))
         final_js = final_js.replace("__CCUI_PORT__", os.environ.get("CLAUDECODEUI_PORT", "3001"))
-        # Clean up double space if no extra flags
-        while "claude  " in final_js:
-            final_js = final_js.replace("claude  ", "claude ")
         result = await evaluate(ws, final_js)
         if "exceptionDetails" in result.get("result", {}):
             desc = result["result"]["exceptionDetails"].get("exception", {}).get("description", "unknown")
