@@ -8,7 +8,6 @@
 #
 # Usage:
 #   ./teams-claude.sh                              # Normal mode
-#   ./teams-claude.sh --dangerously-skip-permissions # Bypass permissions
 #   CLAUDECODEUI_PORT=4000 ./teams-claude.sh       # Custom port
 #
 # Keyboard shortcuts (in Teams):
@@ -17,12 +16,7 @@
 
 DEBUG_PORT=9333
 export CLAUDECODEUI_PORT=${CLAUDECODEUI_PORT:-3001}
-CODEX_EXTRA_FLAGS=""
 FLATPAK_APP="com.github.IsmaelMartinez.teams_for_linux"
-
-if [ "$1" = "--dangerously-skip-permissions" ] || [ "$1" = "--dangerously-bypass-approvals-and-sandbox" ]; then
-    CODEX_EXTRA_FLAGS="--dangerously-bypass-approvals-and-sandbox"
-fi
 
 # Detect Teams for Linux installation (deb or flatpak)
 if [ -x "/opt/teams-for-linux/teams-for-linux" ]; then
@@ -87,7 +81,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/teams-codex.md" /tmp/teams-codex-prompt.md
 cat > /tmp/teams-codex << CODEXEOF
 #!/bin/bash
-exec codex $CODEX_EXTRA_FLAGS \
+exec codex \
     -c 'mcp_servers.chrome-devtools.command="npx"' \
     -c 'mcp_servers.chrome-devtools.args=["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:$DEBUG_PORT"]' \
     -c "developer_instructions=\$(cat /tmp/teams-codex-prompt.md)" \

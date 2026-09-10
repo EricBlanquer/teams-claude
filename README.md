@@ -26,9 +26,6 @@ Embed a Codex CLI terminal directly inside Microsoft Teams for Linux.
 # Normal mode
 ./teams-claude.sh
 
-# Bypass approvals and sandboxing (no confirmation prompts)
-./teams-claude-skip-permissions.sh
-
 # Custom Claude Code UI port
 CLAUDECODEUI_PORT=4000 ./teams-claude.sh
 ```
@@ -41,7 +38,7 @@ To make the Teams menu entry and autostart launch the script instead of plain Te
 - `~/.config/autostart/teams-for-linux.desktop` — autostart at login
 
 ```ini
-Exec=/home/eric/teams-claude/teams-claude-skip-permissions.sh %U
+Exec=/home/eric/teams-claude/teams-claude.sh %U
 ```
 
 **Cinnamon gotcha**: the Cinnamon menu (cinnamon-menus) resolves duplicate desktop-file IDs to the *last* `<AppDir>` in the menu definition, which makes `/usr/share/applications` win over the local override. Fix it by declaring the local directory as the last root-level `<AppDir>` in `~/.config/menus/cinnamon-applications.menu`:
@@ -71,7 +68,7 @@ dbus-send --session --print-reply --dest=org.Cinnamon /org/Cinnamon org.Cinnamon
 | File | Description |
 |------|-------------|
 | `teams-claude.sh` | Main script — launches Teams, injects the xterm.js terminal, and starts Codex; the legacy filename is kept for desktop-entry compatibility |
-| `teams-claude-skip-permissions.sh` | Shortcut — runs Codex with `--dangerously-bypass-approvals-and-sandbox` |
+| `teams-claude-skip-permissions.sh` | Compatibility shortcut to `teams-claude.sh`; uses the regular Codex permission settings |
 | `teams-codex.md` | Developer instructions for Codex (Teams formatting rules and behavior guidelines) |
 
 ## Features
@@ -87,4 +84,4 @@ dbus-send --session --print-reply --dest=org.Cinnamon /org/Cinnamon org.Cinnamon
 - **Session controls** — the `+` button starts a new conversation and reconnect resumes the latest Codex session for the current directory
 - **Relaunch after Ctrl+C** — typing `codex` in the terminal relaunches with the Teams prompt and MCP configuration through `/tmp/teams-codex`
 
-The skip-permissions launcher disables Codex approvals and sandboxing. Use it only in an environment where that level of access is intended.
+The launcher uses the approval and sandbox settings from your regular Codex configuration (`~/.codex/config.toml`), including when resuming a session.
