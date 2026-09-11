@@ -12,6 +12,8 @@ Embed a Codex CLI terminal directly inside Microsoft Teams for Linux.
 4. [Codex CLI](https://developers.openai.com/codex/cli/) starts with Teams-specific developer instructions and a per-session [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) configuration targeting port 9333
 5. Codex can read conversations, type messages, take screenshots, and interact with the Teams UI
 
+At login, the launcher waits up to 60 seconds for Claude Code UI to become available before starting Teams.
+
 ## Prerequisites
 
 1. **Teams for Linux** (deb or flatpak): https://github.com/nicedoc/teams-for-linux/releases

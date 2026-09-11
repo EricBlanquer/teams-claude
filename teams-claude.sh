@@ -16,6 +16,7 @@
 
 DEBUG_PORT=9333
 export CLAUDECODEUI_PORT=${CLAUDECODEUI_PORT:-3001}
+CLAUDECODEUI_STARTUP_TIMEOUT_SECONDS=60
 FLATPAK_APP="com.github.IsmaelMartinez.teams_for_linux"
 
 # Detect Teams for Linux installation (deb or flatpak)
@@ -32,13 +33,19 @@ else
     exit 1
 fi
 
-# Verify claudecodeui is running BEFORE launching Teams
-if ! curl -s "http://127.0.0.1:${CLAUDECODEUI_PORT}/" >/dev/null 2>&1; then
+# Wait for claudecodeui before launching Teams
+CLAUDECODEUI_READY=false
+for ((elapsed = 0; elapsed < CLAUDECODEUI_STARTUP_TIMEOUT_SECONDS; elapsed++)); do
+    if curl -fsS "http://127.0.0.1:${CLAUDECODEUI_PORT}/" >/dev/null 2>&1; then
+        CLAUDECODEUI_READY=true
+        break
+    fi
+    sleep 1
+done
+
+if [ "$CLAUDECODEUI_READY" != true ]; then
     echo "ERROR: claudecodeui not running on port $CLAUDECODEUI_PORT"
     echo "The terminal requires Claude Code UI (https://github.com/siteboon/claudecodeui)"
-    echo "Opening installation page..."
-    xdg-open "https://github.com/siteboon/claudecodeui?tab=readme-ov-file#quick-start" 2>/dev/null || \
-        open "https://github.com/siteboon/claudecodeui?tab=readme-ov-file#quick-start" 2>/dev/null
     exit 1
 fi
 
