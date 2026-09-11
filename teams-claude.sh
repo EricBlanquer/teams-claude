@@ -251,10 +251,18 @@ TERMINAL_JS = r"""
         return b;
     }
 
+    var answerBtn = mkBtn('Answer', 'Open pending question or edit queued message (Alt+Up)');
+    answerBtn.id = 'codex-terminal-answer';
+    answerBtn.onclick = function(e) {
+        e.stopPropagation();
+        sendAltUp();
+        if (term) term.focus();
+    };
     var reconnectBtn = mkBtn('\u27F3', 'Reconnect');
     var newConvBtn = mkBtn('\u002B', 'New conversation');
     var minimizeBtn = mkBtn('\u25BC', 'Minimize');
     var closeBtn = mkBtn('\u2715', 'Close');
+    btnContainer.appendChild(answerBtn);
     btnContainer.appendChild(newConvBtn);
     btnContainer.appendChild(reconnectBtn);
     btnContainer.appendChild(minimizeBtn);
@@ -296,6 +304,12 @@ TERMINAL_JS = r"""
     var term = null;
     var fitAddon = null;
     var ws = null;
+
+    function sendAltUp() {
+        if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'input', data: '\x1b[1;3A' }));
+        }
+    }
 
     function scrollChatToBottom() {
         setTimeout(function() {
@@ -489,6 +503,12 @@ TERMINAL_JS = r"""
 
         // Intercept Ctrl+V to check clipboard for images
         term.attachCustomKeyEventHandler(function(e) {
+            if (e.key === 'ArrowUp' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (e.type === 'keydown') sendAltUp();
+                return false;
+            }
             if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
                 e.preventDefault();
                 e.stopPropagation();

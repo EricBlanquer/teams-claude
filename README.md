@@ -64,6 +64,10 @@ dbus-send --session --print-reply --dest=org.Cinnamon /org/Cinnamon org.Cinnamon
 | `Ctrl+`` | Toggle terminal panel |
 | `Ctrl+V` | Paste (supports images from clipboard) |
 | `Tab` | Autocompletion (focus stays in terminal) |
+| `Alt+Up` | Open a pending Codex question or edit a queued message |
+
+The **Answer** button in the terminal header performs the same action without holding Alt.
+The terminal sends Alt+Up explicitly because xterm.js otherwise maps it to Ctrl+Up on Linux.
 
 ## Files
 
