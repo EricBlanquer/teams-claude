@@ -12,7 +12,7 @@ Embed Claude Code and Codex CLI terminals directly inside Microsoft Teams for Li
 4. The selected assistant starts with Teams-specific instructions and a per-session [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) configuration targeting port 9333
 5. Both assistants can read conversations, type messages, take screenshots, and interact with the Teams UI
 
-At login, the launcher waits up to 60 seconds for Claude Code UI to become available before starting Teams.
+Before anything else, the launcher fast-forwards the repository (`git pull --ff-only`, 30 s timeout) and re-execs itself when the pull brought new commits, so a machine always starts the latest version. It then waits up to 60 seconds for Claude Code UI to become available before starting Teams.
 
 ## Prerequisites
 
@@ -30,6 +30,9 @@ At login, the launcher waits up to 60 seconds for Claude Code UI to become avail
 
 # Custom Claude Code UI port
 CLAUDECODEUI_PORT=4000 ./teams-claude.sh
+
+# Skip the startup auto-update
+TEAMS_CLAUDE_AUTO_PULL=0 ./teams-claude.sh
 ```
 
 ## Desktop integration (replace the Teams launcher)
@@ -80,6 +83,7 @@ The terminal sends Alt+Up explicitly because xterm.js otherwise maps it to Ctrl+
 
 ## Features
 
+- **Auto-update at launch** — fast-forward pull then restart when new commits arrived; a failed or diverged pull only prints a warning and keeps the local version (`TEAMS_CLAUDE_AUTO_PULL=0` disables it)
 - Terminal panel embedded in the Teams conversation area (not an overlay)
 - Resizable by dragging the top edge
 - Panel height saved in localStorage across sessions

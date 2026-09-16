@@ -14,6 +14,27 @@
 #   Ctrl+`  — Toggle terminal panel
 #   Ctrl+V  — Paste (supports images from clipboard)
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AUTO_PULL_TIMEOUT_SECONDS=30
+
+# Auto-update: pull the repository before launching so the machine always runs
+# the latest version, and restart the script when the pull brought new commits.
+if [ -z "$TEAMS_CLAUDE_RESTARTED" ] && [ "$TEAMS_CLAUDE_AUTO_PULL" != "0" ] && \
+   git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    HEAD_BEFORE_PULL=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null)
+    if GIT_TERMINAL_PROMPT=0 timeout "$AUTO_PULL_TIMEOUT_SECONDS" \
+        git -C "$SCRIPT_DIR" pull --ff-only --quiet; then
+        HEAD_AFTER_PULL=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null)
+        if [ -n "$HEAD_BEFORE_PULL" ] && [ -n "$HEAD_AFTER_PULL" ] && \
+           [ "$HEAD_BEFORE_PULL" != "$HEAD_AFTER_PULL" ]; then
+            echo "Update pulled (${HEAD_BEFORE_PULL:0:7} -> ${HEAD_AFTER_PULL:0:7}), restarting the launcher..."
+            TEAMS_CLAUDE_RESTARTED=1 exec "$SCRIPT_DIR/$(basename "$0")" "$@"
+        fi
+    else
+        echo "WARNING: auto-pull failed, launching the local version"
+    fi
+fi
+
 DEBUG_PORT=9333
 export CLAUDECODEUI_PORT=${CLAUDECODEUI_PORT:-3001}
 CLAUDECODEUI_STARTUP_TIMEOUT_SECONDS=60
@@ -84,7 +105,6 @@ echo "Teams launched (PID $TEAMS_PID), injection will happen in background..."
 
 # Prepare the Codex prompt and launcher used inside the PTY. Inline configuration
 # overrides the user's regular Chrome MCP so this session controls Teams on port 9333.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/teams-codex.md" /tmp/teams-codex-prompt.md
 cat > /tmp/teams-codex << CODEXEOF
 #!/bin/bash
