@@ -1,6 +1,6 @@
-# Teams Codex terminal
+# Teams assistant terminal
 
-Embed a Codex CLI terminal directly inside Microsoft Teams for Linux.
+Embed Claude Code and Codex CLI terminals directly inside Microsoft Teams for Linux, with a button to switch between them.
 
 ![Teams with Codex Terminal](https://raw.githubusercontent.com/ebmusic/teams-claude/main/screenshot.png)
 
@@ -9,8 +9,8 @@ Embed a Codex CLI terminal directly inside Microsoft Teams for Linux.
 1. The script launches Teams for Linux with `--remote-debugging-port=9333` (Chrome DevTools Protocol)
 2. It downloads [xterm.js](https://xtermjs.org/) and injects it into the Teams UI via CDP `Runtime.evaluate` (bypasses Content Security Policy)
 3. The xterm.js terminal connects via WebSocket to [Claude Code UI](https://github.com/siteboon/claudecodeui), which provides the PTY session
-4. [Codex CLI](https://developers.openai.com/codex/cli/) starts with Teams-specific developer instructions and a per-session [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) configuration targeting port 9333
-5. Codex can read conversations, type messages, take screenshots, and interact with the Teams UI
+4. The selected assistant starts with Teams-specific instructions and a per-session [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) configuration targeting port 9333
+5. Both assistants can read conversations, type messages, take screenshots, and interact with the Teams UI
 
 At login, the launcher waits up to 60 seconds for Claude Code UI to become available before starting Teams.
 
@@ -18,7 +18,7 @@ At login, the launcher waits up to 60 seconds for Claude Code UI to become avail
 
 1. **Teams for Linux** (deb or flatpak): https://github.com/nicedoc/teams-for-linux/releases
 2. **Claude Code UI** (WebSocket PTY backend): https://github.com/siteboon/claudecodeui
-3. **Codex CLI** available as `codex` on `PATH`
+3. **Codex CLI** available as `codex` and **Claude Code** as `claude` on `PATH`, authenticated with their usual settings
 4. **Node.js/npm** so the launcher can run `chrome-devtools-mcp` through `npx`
 5. **Python 3** with the `websockets` module (`pip install websockets`)
 
@@ -66,16 +66,17 @@ dbus-send --session --print-reply --dest=org.Cinnamon /org/Cinnamon org.Cinnamon
 | `Tab` | Autocompletion (focus stays in terminal) |
 | `Alt+Up` | Open a pending Codex question or edit a queued message |
 
-The **Answer** button in the terminal header performs the same action without holding Alt.
+The **Answer** button in the Codex terminal header performs the same action without holding Alt.
 The terminal sends Alt+Up explicitly because xterm.js otherwise maps it to Ctrl+Up on Linux.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `teams-claude.sh` | Main script — launches Teams, injects the xterm.js terminal, and starts Codex; the legacy filename is kept for desktop-entry compatibility |
+| `teams-claude.sh` | Main script — launches Teams, injects the xterm.js terminal, and starts the selected assistant; the legacy filename is kept for desktop-entry compatibility |
 | `teams-claude-skip-permissions.sh` | Compatibility shortcut to `teams-claude.sh`; uses the regular Codex permission settings |
-| `teams-codex.md` | Developer instructions for Codex (Teams formatting rules and behavior guidelines) |
+| `teams-codex.md` | Shared Teams instructions, passed as Codex developer instructions or appended to the Claude Code system prompt |
+| `terminal.js` | Embedded terminal UI and assistant switching |
 
 ## Features
 
@@ -87,7 +88,10 @@ The terminal sends Alt+Up explicitly because xterm.js otherwise maps it to Ctrl+
 - Auto-detection of Teams installation (deb or flatpak)
 - Background injection (Teams is usable while the terminal loads)
 - **Dedicated project directory** — Codex starts from `~/teams-claude` with Teams-specific developer instructions
-- **Session controls** — the `+` button starts a new conversation and reconnect resumes the latest Codex session for the current directory
+- **Assistant switch** — click `Claude` or `Codex` in the header to show that assistant. Each has its own terminal and conversation; switching keeps both sessions alive, including unfinished input. Histories are separate and are not transferred between assistants. The selected assistant is remembered for the next launch.
+- **Session controls** — `+` starts a new conversation for the displayed assistant; reconnect resumes its latest conversation in the current directory
 - **Relaunch after Ctrl+C** — typing `codex` in the terminal relaunches with the Teams prompt and MCP configuration through `/tmp/teams-codex`
 
-The launcher uses the approval and sandbox settings from your regular Codex configuration (`~/.codex/config.toml`), including when resuming a session.
+Both assistants use their regular permission settings, including when resuming a session. Claude Code receives the same Teams instructions and Chrome DevTools endpoint as Codex.
+
+Validation: `node --test terminal.test.cjs` and `bash -n teams-claude.sh`.
