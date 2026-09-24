@@ -86,6 +86,8 @@ test('switching retains both terminals, output and input routing', () => {
     env.sockets[1].open();
     const init = env.sockets[1].sent.find(message => message.type === 'init');
     assert.match(init.initialCommand, /teams-claude-agent/);
+    assert.match(init.initialCommand, /cd '__USER_HOME__'/);
+    assert.equal(init.projectPath, '__USER_HOME__');
     assert.doesNotMatch(init.initialCommand, /resume --last/);
     assert.match(init.sessionId, /teams-terminal-claude-/);
     env.sockets[0].onmessage({ data: JSON.stringify({ type: 'output', data: 'background result' }) });
@@ -106,10 +108,14 @@ test('reconnect and new conversation apply only to the selected assistant', () =
     env.sockets[0].open();
     env.elements.find(node => node.title === 'Reconnect').click();
     env.sockets[1].open();
-    assert.match(env.sockets[1].sent.find(message => message.type === 'init').initialCommand, /teams-claude-agent --continue/);
+    const reconnect = env.sockets[1].sent.find(message => message.type === 'init');
+    assert.match(reconnect.initialCommand, /teams-claude-agent --continue/);
+    assert.match(reconnect.initialCommand, /cat \/tmp\/teams-claude-cwd/);
     env.elements.find(node => node.title === 'New conversation').click();
     env.sockets[2].open();
-    assert.doesNotMatch(env.sockets[2].sent.find(message => message.type === 'init').initialCommand, /--continue/);
+    const fresh = env.sockets[2].sent.find(message => message.type === 'init');
+    assert.doesNotMatch(fresh.initialCommand, /--continue/);
+    assert.match(fresh.initialCommand, /cd '__USER_HOME__'/);
     assert.equal(env.sockets[0].onmessage, null);
     assert.equal(env.sockets[1].onclose, null);
 });

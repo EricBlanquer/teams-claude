@@ -3,12 +3,12 @@
 #
 # Prerequisites:
 #   1. Teams for Linux (deb or flatpak): https://github.com/IsmaelMartinez/teams-for-linux?tab=readme-ov-file#installation
-#   2. Claude Code UI (backend): https://github.com/siteboon/claudecodeui?tab=readme-ov-file#quick-start
+#   2. Python 3 with the websockets module
 #   3. Codex CLI available on PATH
 #
 # Usage:
 #   ./teams-claude.sh                              # Normal mode
-#   CLAUDECODEUI_PORT=4000 ./teams-claude.sh       # Custom port
+#   TEAMS_TERMINAL_PORT=4000 ./teams-claude.sh     # Custom port
 #
 # Keyboard shortcuts (in Teams):
 #   Ctrl+`  — Toggle terminal panel
@@ -36,8 +36,9 @@ if [ -z "$TEAMS_CLAUDE_RESTARTED" ] && [ "$TEAMS_CLAUDE_AUTO_PULL" != "0" ] && \
 fi
 
 DEBUG_PORT=9333
-export CLAUDECODEUI_PORT=${CLAUDECODEUI_PORT:-3001}
-CLAUDECODEUI_STARTUP_TIMEOUT_SECONDS=60
+export TEAMS_TERMINAL_PORT=${TEAMS_TERMINAL_PORT:-3001}
+TERMINAL_STARTUP_TIMEOUT_SECONDS=10
+TERMINAL_HEALTH="ready $(sha256sum "$SCRIPT_DIR/terminal_server.py" | cut -d ' ' -f1)"
 FLATPAK_APP="com.github.IsmaelMartinez.teams_for_linux"
 
 # Detect Teams for Linux installation (deb or flatpak)
@@ -82,6 +83,20 @@ asyncio.run(close())
     sleep 0.5
 fi
 
+if ! curl -fsS --max-time 1 "http://127.0.0.1:${TEAMS_TERMINAL_PORT}/health" 2>/dev/null | grep -Fxq "$TERMINAL_HEALTH"; then
+    OLD_TERMINAL_PID=$(pgrep -f "^python3 $SCRIPT_DIR/terminal_server.py --port $TEAMS_TERMINAL_PORT$" | head -1)
+    if [ -n "$OLD_TERMINAL_PID" ]; then
+        kill -TERM "$OLD_TERMINAL_PID"
+        for i in $(seq 1 20); do
+            kill -0 "$OLD_TERMINAL_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
+    mkdir -p "$HOME/.cache/teams-claude"
+    nohup python3 "$SCRIPT_DIR/terminal_server.py" --port "$TEAMS_TERMINAL_PORT" \
+        >> "$HOME/.cache/teams-claude/terminal-server.log" 2>&1 < /dev/null &
+fi
+
 # Launch Teams with remote debugging
 $TEAMS_CMD &>/dev/null &
 TEAMS_PID=$!
@@ -124,7 +139,7 @@ chmod 700 /tmp/teams-claude-agent
 for assistant in codex claude; do
 cat > "/tmp/teams-$assistant-bashrc" << BASHEOF
 [ -f ~/.bashrc ] && source ~/.bashrc
-cd "\$(cat /tmp/teams-$assistant-cwd 2>/dev/null)" 2>/dev/null || cd "$SCRIPT_DIR"
+cd "\$(cat /tmp/teams-$assistant-cwd 2>/dev/null)" 2>/dev/null || cd "$HOME"
 PROMPT_COMMAND='printf "%s" "\$PWD" > /tmp/teams-$assistant-cwd'
 alias codex='/tmp/teams-codex'
 alias claude='/tmp/teams-claude-agent'
@@ -133,16 +148,16 @@ done
 
 # Wait for Teams and inject in background so Teams is not blocked
 (
-CLAUDECODEUI_READY=false
-for ((elapsed = 0; elapsed < CLAUDECODEUI_STARTUP_TIMEOUT_SECONDS; elapsed++)); do
-    if curl -fsS "http://127.0.0.1:${CLAUDECODEUI_PORT}/" >/dev/null 2>&1; then
-        CLAUDECODEUI_READY=true
+TERMINAL_READY=false
+for ((elapsed = 0; elapsed < TERMINAL_STARTUP_TIMEOUT_SECONDS; elapsed++)); do
+    if curl -fsS --max-time 1 "http://127.0.0.1:${TEAMS_TERMINAL_PORT}/health" 2>/dev/null | grep -Fxq "$TERMINAL_HEALTH"; then
+        TERMINAL_READY=true
         break
     fi
     sleep 1
 done
-if [ "$CLAUDECODEUI_READY" != true ]; then
-    echo "WARNING: claudecodeui not running on port $CLAUDECODEUI_PORT; terminal injection skipped"
+if [ "$TERMINAL_READY" != true ]; then
+    echo "WARNING: terminal backend not running on port $TEAMS_TERMINAL_PORT; terminal injection skipped"
     exit 0
 fi
 
@@ -536,7 +551,7 @@ async def inject():
         print("Injecting terminal UI...")
         final_js = TERMINAL_JS.replace("__TEAMS_DIR__", TEAMS_DIR)
         final_js = final_js.replace("__USER_HOME__", os.path.expanduser("~"))
-        final_js = final_js.replace("__CCUI_PORT__", os.environ.get("CLAUDECODEUI_PORT", "3001"))
+        final_js = final_js.replace("__TERMINAL_PORT__", os.environ.get("TEAMS_TERMINAL_PORT", "3001"))
         result = await evaluate(ws, final_js)
         if "exceptionDetails" in result.get("result", {}):
             desc = result["result"]["exceptionDetails"].get("exception", {}).get("description", "unknown")

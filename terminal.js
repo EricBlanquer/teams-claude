@@ -67,7 +67,7 @@ function createTerminal(provider) {
     var label = provider === 'claude' ? 'Claude' : 'Codex';
     if (document.getElementById(panelId)) return;
 
-    var CCUI_HOST = 'ws://localhost:__CCUI_PORT__/shell';
+    var TERMINAL_HOST = 'ws://localhost:__TERMINAL_PORT__/shell';
 
     // --- Find the main conversation area (grid-area: main) ---
     var mainArea = document.querySelector('[class*="AppLayoutArea"][class*="___e1b8f60"]') ||
@@ -341,7 +341,7 @@ function createTerminal(provider) {
         term.open(termContainer);
         fitTerminal();
 
-        try { ws = new WebSocket(CCUI_HOST); }
+        try { ws = new WebSocket(TERMINAL_HOST); }
         catch(e) {
             statusDot.style.background = '#ff6b6b';
             term.write('\x1b[31mConnection failed: ' + e.message + '\x1b[0m\r\n');
@@ -354,14 +354,16 @@ function createTerminal(provider) {
             if (isOpen) scrollChatToBottom();
             var pathSetup = 'export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node/ 2>/dev/null | tail -1)/bin:$PATH" 2>/dev/null';
             var cwdFile = '/tmp/teams-' + provider + '-cwd';
-            var cdCmd = 'cd "$(cat ' + cwdFile + ' 2>/dev/null)" 2>/dev/null || cd ' + shellQuote('__TEAMS_DIR__');
+            var cdCmd = newConversation
+                ? 'cd ' + shellQuote('__USER_HOME__')
+                : 'cd "$(cat ' + cwdFile + ' 2>/dev/null)" 2>/dev/null || cd ' + shellQuote('__USER_HOME__');
             var launcher = provider === 'claude' ? '/tmp/teams-claude-agent' : '/tmp/teams-codex';
             var resumeArgs = provider === 'claude' ? ' --continue' : ' resume --last';
             var agentCmd = newConversation ? launcher : '(' + launcher + resumeArgs + ' || ' + launcher + ')';
             var bashrc = '/tmp/teams-' + provider + '-bashrc';
             ws.send(JSON.stringify({
                 type: 'init',
-                projectPath: '__TEAMS_DIR__',
+                projectPath: '__USER_HOME__',
                 sessionId: 'teams-terminal-' + provider + '-' + Date.now(),
                 hasSession: false,
                 provider: 'plain-shell',
@@ -427,7 +429,7 @@ function createTerminal(provider) {
         reader.onload = function() {
             var base64 = reader.result.split(',')[1];
             var filename = '/tmp/codex-paste-' + Date.now() + '.png';
-            var tempWs = new WebSocket(CCUI_HOST);
+            var tempWs = new WebSocket(TERMINAL_HOST);
             var done = false;
             tempWs.onmessage = function(event) {
                 try {
