@@ -12,7 +12,7 @@ Embed Claude Code and Codex CLI terminals directly inside Microsoft Teams for Li
 4. The selected assistant starts with Teams-specific instructions and a per-session [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) configuration targeting port 9333
 5. Both assistants can read conversations, type messages, take screenshots, and interact with the Teams UI
 
-Before anything else, the launcher fast-forwards the repository (`git pull --ff-only`, 30 s timeout) and re-execs itself when the pull brought new commits, so a machine always starts the latest version. It then waits up to 60 seconds for Claude Code UI to become available before starting Teams.
+Before anything else, the launcher fast-forwards the repository (`git pull --ff-only`, 30 s timeout) and re-execs itself when the pull brought new commits, so a machine always starts the latest version. Teams starts immediately after the update. Terminal injection waits up to 60 seconds for Claude Code UI and is skipped if the service is unavailable; Teams remains usable.
 
 ## Prerequisites
 

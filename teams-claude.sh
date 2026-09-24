@@ -54,22 +54,6 @@ else
     exit 1
 fi
 
-# Wait for claudecodeui before launching Teams
-CLAUDECODEUI_READY=false
-for ((elapsed = 0; elapsed < CLAUDECODEUI_STARTUP_TIMEOUT_SECONDS; elapsed++)); do
-    if curl -fsS "http://127.0.0.1:${CLAUDECODEUI_PORT}/" >/dev/null 2>&1; then
-        CLAUDECODEUI_READY=true
-        break
-    fi
-    sleep 1
-done
-
-if [ "$CLAUDECODEUI_READY" != true ]; then
-    echo "ERROR: claudecodeui not running on port $CLAUDECODEUI_PORT"
-    echo "The terminal requires Claude Code UI (https://github.com/siteboon/claudecodeui)"
-    exit 1
-fi
-
 # Gracefully close Teams via window close (saves position/size)
 if pgrep -x teams-for-linux >/dev/null 2>&1; then
     # Try closing via DevTools Protocol (triggers Electron window close event)
@@ -149,6 +133,19 @@ done
 
 # Wait for Teams and inject in background so Teams is not blocked
 (
+CLAUDECODEUI_READY=false
+for ((elapsed = 0; elapsed < CLAUDECODEUI_STARTUP_TIMEOUT_SECONDS; elapsed++)); do
+    if curl -fsS "http://127.0.0.1:${CLAUDECODEUI_PORT}/" >/dev/null 2>&1; then
+        CLAUDECODEUI_READY=true
+        break
+    fi
+    sleep 1
+done
+if [ "$CLAUDECODEUI_READY" != true ]; then
+    echo "WARNING: claudecodeui not running on port $CLAUDECODEUI_PORT; terminal injection skipped"
+    exit 0
+fi
+
 # Wait for remote debugging to become available (up to 60s)
 for i in $(seq 1 60); do
     curl -s "http://127.0.0.1:${DEBUG_PORT}/json/version" >/dev/null 2>&1 && break
