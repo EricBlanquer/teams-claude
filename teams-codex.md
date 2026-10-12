@@ -35,32 +35,26 @@ Post messages with `__TEAMS_DIR__/teams_graph.py`. It runs inside the Teams page
    ```
    It prints `displayedTitle` (null when the conversation is not displayed), `kind`, `html`, the resolved `mentions` (`firstName`, `displayName`), a readable `preview` text and an `approval` code. Chat ids post to `POST /chats/{id}/messages`; channel ids (`@thread.tacv2`, `@thread.skype`) post a new channel post to `POST /teams/{teamId}/channels/{id}/messages`, with the team resolved from the joined teams or given with `--team <teamId>`.
 4. APPROVAL BEFORE SENDING (ABSOLUTE): show the user the approval preview in your final response using the layout below, then END YOUR TURN.
-   - The embedded terminal may render Markdown code blocks without a visible border, so always print the literal BEGIN and END delimiter lines shown below outside the code block, each in its own paragraph.
-   - Put only the exact `preview` text inside the code block, with no timestamp, destination, explanation, delimiter or approval question inside it.
-   - Show the destination (`displayedTitle`, or the `conversationId` and `kind`) before the BEGIN delimiter.
-   - After the END delimiter, name who each mention resolved to and describe any formatting the text preview cannot show (bold, colors, tables); omit these lines when there are no mentions or special formatting.
-   - The delimiter lines and approval question belong to the assistant response only; never add them to the message file or send them to Teams.
-   - Use a code fence longer than any backtick sequence in `preview` so messages containing code do not break the layout.
+   - Display the exact `preview` text as a simple Markdown blockquote, prefixing every line with `> ` (including blank lines).
+   - Keep the message in a single quotation, with no added bold, frame, BEGIN/END delimiters, timestamp, destination, explanation or approval question inside it.
+   - Escape literal Markdown characters when needed to preserve the visible message text.
+   - Show the destination (`displayedTitle`, or the `conversationId` and `kind`) above the quotation.
+   - Below the quotation, name who each mention resolved to and describe any formatting the text preview cannot show (bold, colors, tables); omit these lines when there are no mentions or special formatting.
+   - The quote markers and approval question belong to the assistant response only; never add them to the message file or send them to Teams.
    - Never run `send` in the same turn as the preview, and never without the user's explicit approval of that exact preview.
    - If the user asks for a change, edit the file, preview again and ask again.
 
    Approval response layout (replace the placeholders with the resolved values):
 
-   ````text
+   ```text
    DESTINATION TEAMS : <destination>
 
-   ===== DÉBUT DU MESSAGE TEAMS =====
-
-   ```text
-   <preview verbatim>
-   ```
-
-   ===== FIN DU MESSAGE TEAMS =====
+   > <exact preview text>
 
    <resolved mentions and formatting, if any>
 
    Envoyer ce message exact ?
-   ````
+   ```
 5. Once approved, send exactly the previewed message with its approval code:
    ```bash
    python3 __TEAMS_DIR__/teams_graph.py send '<conversationId>' --file /tmp/teams-message.html --mention 'Marie Boudet' --approval '<approval>'
