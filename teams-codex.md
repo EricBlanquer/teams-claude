@@ -19,8 +19,47 @@ This Teams instance is shared: the user may be actively using it at the same tim
 - When the user is (or may be) interacting: DO NOT click, type, paste, or press keys in Teams. Stop, tell the user what you see, and wait — don't try to "work around" their session.
 - If the UI state changed unexpectedly between two of your actions (conversation switched on its own, an edit box appeared, a draft showed up), treat it as the user having taken over. Pause immediately rather than continuing your sequence.
 - Prefer clicks on precise uids over global key presses; a stray Enter/Ctrl+V in the wrong focus can send or edit the wrong thing. Re-verify focus with a fresh snapshot if any doubt.
+- Sending through `teams_graph.py` (next section) does not interact with the UI; these rules apply to clicks, typing, pastes and key presses.
 
-## Teams Message Formatting
+## Sending messages: Microsoft Graph first
+
+Post messages with `__TEAMS_DIR__/teams_graph.py`. It runs inside the Teams page through the DevTools endpoint and calls Microsoft Graph with the token of the signed-in Teams session, which never leaves the page. It does not touch the compose box, focus, drafts or clipboard, so it can send while the user is using Teams.
+
+1. Identify the target: `python3 __TEAMS_DIR__/teams_graph.py current` prints the conversation displayed in Teams (`kind`, `conversationId`, `threadType`, `title`). Check that the title is the intended conversation. Target another conversation only with an id the user explicitly designated.
+2. Send to that explicit id, with the message in a file or on stdin:
+   ```bash
+   python3 __TEAMS_DIR__/teams_graph.py send '<conversationId>' --file /tmp/teams-message.html
+   printf '%s' "$html" | python3 __TEAMS_DIR__/teams_graph.py send '<conversationId>'
+   ```
+   - Chat ids use `POST /chats/{id}/messages`. Channel ids (`@thread.tacv2`, `@thread.skype`) use `POST /teams/{teamId}/channels/{id}/messages`, which creates a new channel post; the team is resolved from the joined teams, or pass `--team <teamId>`.
+   - The body is HTML: `<p>`, `<br>`, `<b>`, `<i>`, `<s>`, `<code>`, `<pre>`, `<a href>`, `<ul>`/`<ol>`/`<li>`, `<table>`, `<blockquote>`, `<span style>`. Plain newlines are collapsed, so use `<br>` or `<p>`, and escape `<`, `>` and `&` in text.
+   - `--text` sends plain text instead: HTML is escaped and line breaks are kept.
+3. On success the command prints the created message, including `content` as stored by Teams (`<pre>` becomes `<codeblock>`). On failure it exits with status 1 and prints the error: report it, and check the conversation before any retry so the message is never posted twice.
+4. Apply the post-send verification below.
+
+Use the compose-box fallback only for what this command does not cover: @mentions, replies inside an existing channel post, and file or image attachments.
+
+## Post-send verification (ABSOLUTE — always re-read yourself)
+- AFTER sending any message, ALWAYS re-read what was actually posted to confirm the rendered result matches what you intended. Do not assume it worked.
+- Use take_snapshot to check the text content. If the message involves ANY visual formatting you cannot judge from the DOM text (colors, highlights, table layout, images), take a REAL X11 screenshot via `~/binPerso/teams-screenshot.sh` (NOT take_screenshot) — the a11y snapshot does NOT convey colors, and CDP take_screenshot is not color-faithful.
+- Never describe or announce a visual effect (a color, a highlight) you have not verified survived the render. Teams' sanitizer silently drops some styles; what you pasted is not necessarily what shows.
+- If the render differs from the intent, fix it (edit or repost) rather than leaving a wrong/misleading message.
+- When the target conversation is not displayed, do not switch the user's view to check it: rely on the `content` returned by `teams_graph.py` and say that the visual render was not checked.
+
+## Colors and highlighting (HTML — X11-verified)
+To write colored text, use HTML (Graph body, or ClipboardItem with a `text/html` blob when pasting), not markdown. Rules (all verified with the X11 screenshot after an HTML paste):
+- Text color: ALWAYS use `<span style="color:#…">`. This is the ONE reliable method. Verified rendered: red `#e81123`, blue `#0078d4`, greens `#13a10e`/`#6bb700`/`#92c353`. Rejected → fall back to white: dark greens `#107c10`/`#498205`, and yellow `#fff100` (yellow text not supported at all). Use bright palette colors; reliable green = `#13a10e`, red = `#e81123`.
+- `color` on a `<b>` is DROPPED (renders white). NEVER put `color` on `<b>`. For bold + color, put both in the span: `<span style="color:#e81123;font-weight:700">`.
+- Readable highlight (yellow bg + colored text) DOES work via paste: put BOTH `background-color` and `color` on the SAME span, using PALETTE values. Verified: `<span style="background-color:rgb(229,241,143);color:rgb(30,83,163)">TEXT</span>` → blue on yellow, readable (red text `rgb(164,38,44)` also works). Do NOT use `color:#000`/`#fff` on a highlight — black/white are rejected and remapped to white (this is what made it look "always white" before). `background` on `<td>`/`<tr>` is stripped and `<mark>` does nothing. To find exact palette rgb, format natively (toolbar) then read the span's inline style via evaluate_script.
+- `<b>`/`<i>`/`<code>` (without color) and table borders/padding survive reliably.
+- After sending, ALWAYS confirm colors with the X11 screenshot, cropped and UPSCALED enough (3-4×) to read true pixel colors — bold weight fooled me into reading white as green/black at low zoom. Never announce a color you have not verified this way.
+- Graph posts keep these tags and inline styles in the stored `content`; their render has not been X11-verified yet, so verify it as above.
+
+Official Teams palettes (8 per type, exact rgb read from the toolbar DOM — use these for guaranteed rendering):
+- Text color: Rouge `rgb(182,66,76)`, Orange toscan `rgb(205,89,55)`, Jaune rougeâtre `rgb(253,192,48)`, Poire `rgb(189,203,76)`, Eucalyptus `rgb(43,155,98)`, Jade délavé `rgb(55,121,123)`, Bleu Fun `rgb(30,83,163)`, Pourpre de Tyr `rgb(165,57,122)`.
+- Highlight: Rouge Kobi `rgb(223,146,153)`, Bouton de rose `rgb(244,165,147)`, Jaune paille `rgb(253,212,114)`, Primevère `rgb(229,241,143)`, Mante `rgb(130,205,168)`, Bleu Regent St. `rgb(157,217,219)`, Gris pervenche `rgb(199,212,232)`, Rose pâle `rgb(235,211,225)`.
+
+## Compose-box fallback
 
 When typing messages in the Teams compose box, Teams uses a rich text editor with auto-formatting. Follow these rules:
 
@@ -63,24 +102,6 @@ When typing messages in the Teams compose box, Teams uses a rich text editor wit
   Then Ctrl+V. Use real HTML tags (`<table>`, `<ul>`, `<b>`, `<code>`), not markdown. `writeText` is fine only for plain unformatted text.
 - Only use `type_text` for very short texts or when paste doesn't work.
 - Verify before sending — X11 screenshot for anything visual (colors/highlights/tables), snapshot for plain text.
-
-### Post-send verification (ABSOLUTE — always re-read yourself)
-- AFTER sending any message, ALWAYS re-read what was actually posted to confirm the rendered result matches what you intended. Do not assume it worked.
-- Use take_snapshot to check the text content. If the message involves ANY visual formatting you cannot judge from the DOM text (colors, highlights, table layout, images), take a REAL X11 screenshot via `~/binPerso/teams-screenshot.sh` (NOT take_screenshot) — the a11y snapshot does NOT convey colors, and CDP take_screenshot is not color-faithful.
-- Never describe or announce a visual effect (a color, a highlight) you have not verified survived the render. Teams' sanitizer silently drops some styles; what you pasted is not necessarily what shows.
-- If the render differs from the intent, fix it (edit or repost) rather than leaving a wrong/misleading message.
-
-### Colors and highlighting (HTML paste — X11-verified)
-To write colored text, paste HTML (ClipboardItem with a `text/html` blob), not markdown. Rules (all verified with the X11 screenshot):
-- Text color: ALWAYS use `<span style="color:#…">`. This is the ONE reliable method. Verified rendered: red `#e81123`, blue `#0078d4`, greens `#13a10e`/`#6bb700`/`#92c353`. Rejected → fall back to white: dark greens `#107c10`/`#498205`, and yellow `#fff100` (yellow text not supported at all). Use bright palette colors; reliable green = `#13a10e`, red = `#e81123`.
-- `color` on a `<b>` is DROPPED (renders white). NEVER put `color` on `<b>`. For bold + color, put both in the span: `<span style="color:#e81123;font-weight:700">`.
-- Readable highlight (yellow bg + colored text) DOES work via paste: put BOTH `background-color` and `color` on the SAME span, using PALETTE values. Verified: `<span style="background-color:rgb(229,241,143);color:rgb(30,83,163)">TEXT</span>` → blue on yellow, readable (red text `rgb(164,38,44)` also works). Do NOT use `color:#000`/`#fff` on a highlight — black/white are rejected and remapped to white (this is what made it look "always white" before). `background` on `<td>`/`<tr>` is stripped and `<mark>` does nothing. To find exact palette rgb, format natively (toolbar) then read the span's inline style via evaluate_script.
-- `<b>`/`<i>`/`<code>` (without color) and table borders/padding survive reliably.
-- After sending, ALWAYS confirm colors with the X11 screenshot, cropped and UPSCALED enough (3-4×) to read true pixel colors — bold weight fooled me into reading white as green/black at low zoom. Never announce a color you have not verified this way.
-
-Official Teams palettes (8 per type, exact rgb read from the toolbar DOM — use these for guaranteed rendering):
-- Text color: Rouge `rgb(182,66,76)`, Orange toscan `rgb(205,89,55)`, Jaune rougeâtre `rgb(253,192,48)`, Poire `rgb(189,203,76)`, Eucalyptus `rgb(43,155,98)`, Jade délavé `rgb(55,121,123)`, Bleu Fun `rgb(30,83,163)`, Pourpre de Tyr `rgb(165,57,122)`.
-- Highlight: Rouge Kobi `rgb(223,146,153)`, Bouton de rose `rgb(244,165,147)`, Jaune paille `rgb(253,212,114)`, Primevère `rgb(229,241,143)`, Mante `rgb(130,205,168)`, Bleu Regent St. `rgb(157,217,219)`, Gris pervenche `rgb(199,212,232)`, Rose pâle `rgb(235,211,225)`.
 
 ### Other rules
 - When composing a multi-line message with bullets or formatting, always type the full message content before sending.

@@ -10,7 +10,8 @@ Embed Claude Code and Codex CLI terminals directly inside Microsoft Teams for Li
 2. It downloads [xterm.js](https://xtermjs.org/) and injects it into the Teams UI via CDP `Runtime.evaluate` (bypasses Content Security Policy)
 3. The xterm.js terminal connects via WebSocket to the bundled `terminal_server.py`, which provides a local PTY session
 4. The selected assistant starts with Teams-specific instructions and a per-session [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) configuration targeting port 9333
-5. Both assistants can read conversations, type messages, take screenshots, and interact with the Teams UI
+5. Both assistants can read conversations, take screenshots, and interact with the Teams UI
+6. They post messages with `teams_graph.py`, which calls Microsoft Graph (`POST /chats/{id}/messages`, or `POST /teams/{teamId}/channels/{id}/messages` for channels) from inside the Teams page with the signed-in session token, without touching the compose box, focus, drafts, or clipboard
 
 Before anything else, the launcher fast-forwards the repository (`git pull --ff-only`, 30 s timeout) and re-execs itself when the pull brought new commits, so a machine always starts the latest version. It starts the local terminal backend and Teams, then injects the terminal when the backend and Teams page are ready. If the backend fails to start, Teams remains usable and the error is written to `~/.cache/teams-claude/terminal-server.log`.
 
@@ -78,7 +79,9 @@ The terminal sends Alt+Up explicitly because xterm.js otherwise maps it to Ctrl+
 | `teams-claude.sh` | Main script — launches Teams, injects the xterm.js terminal, and starts the selected assistant; the legacy filename is kept for desktop-entry compatibility |
 | `teams-claude-skip-permissions.sh` | Compatibility shortcut to `teams-claude.sh`; uses the regular Codex permission settings |
 | `terminal_server.py` | Local WebSocket PTY backend for the embedded terminal |
-| `teams-codex.md` | Shared Teams instructions, passed as Codex developer instructions or appended to the Claude Code system prompt |
+| `teams-codex.md` | Shared Teams instructions, passed as Codex developer instructions or appended to the Claude Code system prompt; `__TEAMS_DIR__` is replaced with the repository path |
+| `teams_graph.py` | Message CLI: `current` prints the displayed conversation, `send <conversationId>` posts HTML (or `--text`) read from stdin or `--file` |
+| `teams_graph.js` | Code evaluated in the Teams page by `teams_graph.py`: reads the conversation from the DOM and calls Graph with the cached Teams token, refreshed with the Teams refresh token when expired |
 | `terminal.js` | Embedded terminal UI and assistant switching |
 
 ## Features
@@ -95,8 +98,9 @@ The terminal sends Alt+Up explicitly because xterm.js otherwise maps it to Ctrl+
 - **Home directory** — new Claude and Codex conversations start from `~` with Teams-specific instructions
 - **Assistant switch** — click `Claude` or `Codex` in the header to show that assistant. Each has its own terminal and conversation; switching keeps both sessions alive, including unfinished input. Histories are separate and are not transferred between assistants. The selected assistant is remembered for the next launch.
 - **Session controls** — `+` starts a new conversation for the displayed assistant; reconnect resumes its latest conversation in the current directory
+- **Graph message sending** — `python3 teams_graph.py current` then `python3 teams_graph.py send '<conversationId>' --file message.html`. The token never leaves the Teams page and the Teams token cache is not modified. Channel teams are resolved from the joined teams unless `--team` is given. @mentions, replies inside a channel post, and attachments still go through the compose box
 - **Relaunch after Ctrl+C** — typing `codex` in the terminal relaunches with the Teams prompt and MCP configuration through `/tmp/teams-codex`
 
 Both assistants use their regular permission settings, including when resuming a session. Claude Code receives the same Teams instructions and Chrome DevTools endpoint as Codex.
 
-Validation: `python3 -m unittest terminal_server_test.py`, `node --test terminal.test.cjs`, and `bash -n teams-claude.sh`.
+Validation: `python3 -m unittest terminal_server_test.py teams_graph_test.py`, `node --test terminal.test.cjs teams_graph.test.cjs`, and `bash -n teams-claude.sh`.

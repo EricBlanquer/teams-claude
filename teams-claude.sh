@@ -104,7 +104,8 @@ echo "Teams launched (PID $TEAMS_PID), injection will happen in background..."
 
 # Prepare the Codex prompt and launcher used inside the PTY. Inline configuration
 # overrides the user's regular Chrome MCP so this session controls Teams on port 9333.
-cp "$SCRIPT_DIR/teams-codex.md" /tmp/teams-codex-prompt.md
+TEAMS_PROMPT=$(<"$SCRIPT_DIR/teams-codex.md")
+printf '%s\n' "${TEAMS_PROMPT//__TEAMS_DIR__/"$SCRIPT_DIR"}" > /tmp/teams-codex-prompt.md
 cat > /tmp/teams-codex << CODEXEOF
 #!/bin/bash
 (while [ -d /proc/\$\$ ]; do
