@@ -103,6 +103,24 @@ class MessageHtmlTest(unittest.TestCase):
                 teams_graph.message_html(content, plain_text)
 
 
+class HtmlToTextTest(unittest.TestCase):
+    def test_renders_teams_html_as_readable_text(self):
+        content = (
+            '<p>Bonjour <at id="0">Marie</at>,</p>\n<ul>\n<li>un</li><li>deux <b>gras</b><ul><li>sous</li></ul></li></ul>'
+            '<ol><li>a</li><li>b</li></ol><table border="1">\n<tbody>\n<tr>\n<th>A</th>\n<th>B</th>\n</tr>\n'
+            '<tr>\n<td>1</td>\n<td>2</td>\n</tr>\n</tbody>\n</table>'
+            '<codeblock class="">x = 1\n  y = 2</codeblock><blockquote>citation</blockquote>'
+            '<p>ligne   1<br>\nligne 2 &lt;id&gt; &amp; é</p>'
+        )
+        self.assertEqual(teams_graph.html_to_text(content), "\n".join([
+            "Bonjour @Marie,", "", "- un", "- deux gras", "  - sous", "", "1. a", "2. b", "", "A | B", "1 | 2", "",
+            "x = 1", "  y = 2", "", "> citation", "", "ligne 1", "ligne 2 <id> & é",
+        ]))
+
+    def test_keeps_plain_text_messages(self):
+        self.assertEqual(teams_graph.html_to_text("a &lt; b<br>second"), "a < b\nsecond")
+
+
 class RunTest(unittest.TestCase):
     def test_evaluates_the_page_script_with_the_request(self):
         result = {"kind": "chat", "messageId": "1"}
@@ -142,9 +160,12 @@ class MainTest(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue(), run
 
     def test_sends_stdin_as_html(self):
-        code, stdout, _, run = self.run_main(["send", "19:a@thread.v2"], "<b>é</b>", {"messageId": "1"})
+        code, stdout, _, run = self.run_main(["send", "19:a@thread.v2", "--approval", "abc"], "<b>é</b>", {"messageId": "1"})
         self.assertEqual(code, 0)
-        run.assert_called_once_with({"action": "send", "conversationId": "19:a@thread.v2", "teamId": None, "html": "<b>é</b>"})
+        run.assert_called_once_with({
+            "action": "send", "conversationId": "19:a@thread.v2", "teamId": None, "html": "<b>é</b>", "mentions": [],
+            "approval": "abc",
+        })
         self.assertEqual(json.loads(stdout), {"messageId": "1"})
 
     def test_sends_a_plain_text_file_to_a_channel_team(self):
@@ -152,9 +173,38 @@ class MainTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "message.txt"
         path.write_text("x < y\n", encoding="utf-8")
-        code, _, _, run = self.run_main(["send", "19:c@thread.tacv2", "--team", "t", "--file", str(path), "--text"], answer={})
+        code, _, _, run = self.run_main(
+            ["send", "19:c@thread.tacv2", "--team", "t", "--file", str(path), "--text", "--approval", "abc"], answer={},
+        )
         self.assertEqual(code, 0)
-        run.assert_called_once_with({"action": "send", "conversationId": "19:c@thread.tacv2", "teamId": "t", "html": "x &lt; y"})
+        run.assert_called_once_with({
+            "action": "send", "conversationId": "19:c@thread.tacv2", "teamId": "t", "html": "x &lt; y", "mentions": [],
+            "approval": "abc",
+        })
+
+    def test_passes_every_mention(self):
+        code, _, _, run = self.run_main(
+            ["preview", "19:a@thread.v2", "--mention", "Marie Boudet", "--mention", "Paul"], "@Marie Boudet @Paul", {"html": ""},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args.args[0]["mentions"], ["Marie Boudet", "Paul"])
+
+    def test_previews_with_a_readable_text_rendering(self):
+        code, stdout, _, run = self.run_main(
+            ["preview", "48:notes"], "<p>Hi <at>Eric</at></p>", {"html": '<p>Hi <at id="0">Eric</at></p>', "approval": "abc"},
+        )
+        self.assertEqual(code, 0)
+        run.assert_called_once_with({"action": "preview", "conversationId": "48:notes", "teamId": None, "html": "<p>Hi <at>Eric</at></p>", "mentions": []})
+        self.assertEqual(json.loads(stdout), {"html": '<p>Hi <at id="0">Eric</at></p>', "approval": "abc", "preview": "Hi @Eric"})
+
+    def test_requires_an_approval_code_to_send(self):
+        stderr = io.StringIO()
+        with mock.patch.object(teams_graph, "run") as run, contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as raised:
+            teams_graph.main(["send", "19:a@thread.v2"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--approval", stderr.getvalue())
+        run.assert_not_called()
 
     def test_prints_the_displayed_conversation(self):
         code, stdout, _, run = self.run_main(["current"], answer={"title": "Alice"})
@@ -163,13 +213,13 @@ class MainTest(unittest.TestCase):
         self.assertEqual(json.loads(stdout), {"title": "Alice"})
 
     def test_fails_without_calling_teams_for_an_empty_message(self):
-        code, stdout, stderr, run = self.run_main(["send", "19:a@thread.v2"], "  ")
+        code, stdout, stderr, run = self.run_main(["send", "19:a@thread.v2", "--approval", "abc"], "  ")
         self.assertEqual((code, stdout), (1, ""))
         self.assertEqual(stderr, "teams_graph: The message is empty\n")
         run.assert_not_called()
 
     def test_reports_a_missing_file(self):
-        code, _, stderr, run = self.run_main(["send", "19:a@thread.v2", "--file", "/nonexistent/message.html"])
+        code, _, stderr, run = self.run_main(["preview", "19:a@thread.v2", "--file", "/nonexistent/message.html"])
         self.assertEqual(code, 1)
         self.assertIn("/nonexistent/message.html", stderr)
         run.assert_not_called()

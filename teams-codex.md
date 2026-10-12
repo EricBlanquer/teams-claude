@@ -26,24 +26,30 @@ This Teams instance is shared: the user may be actively using it at the same tim
 Post messages with `__TEAMS_DIR__/teams_graph.py`. It runs inside the Teams page through the DevTools endpoint and calls Microsoft Graph with the token of the signed-in Teams session, which never leaves the page. It does not touch the compose box, focus, drafts or clipboard, so it can send while the user is using Teams.
 
 1. Identify the target: `python3 __TEAMS_DIR__/teams_graph.py current` prints the conversation displayed in Teams (`kind`, `conversationId`, `threadType`, `title`). Check that the title is the intended conversation. Target another conversation only with an id the user explicitly designated.
-2. Send to that explicit id, with the message in a file or on stdin:
+2. Write the message to a file, for example `/tmp/teams-message.html`:
+   - The body is HTML: `<p>`, `<br>`, `<b>`, `<i>`, `<s>`, `<code>`, `<pre>`, `<a href>`, `<ul>`/`<ol>`/`<li>`, `<table>`, `<blockquote>`, `<span style>`. Plain newlines are collapsed, so use `<br>` or `<p>`, and escape `<`, `>` and `&` in text. `--text` treats the file as plain text instead: HTML is escaped and line breaks are kept.
+   - Mentions: write `@<name>` where each mention goes and pass `--mention '<name>'` with the same name (full or partial display name; case and accents are ignored). The mention displays the person's first name only. A name matching no member or several members fails before anything is posted.
+3. Preview, which resolves everything but posts nothing:
    ```bash
-   python3 __TEAMS_DIR__/teams_graph.py send '<conversationId>' --file /tmp/teams-message.html
-   printf '%s' "$html" | python3 __TEAMS_DIR__/teams_graph.py send '<conversationId>'
+   python3 __TEAMS_DIR__/teams_graph.py preview '<conversationId>' --file /tmp/teams-message.html --mention 'Marie Boudet'
    ```
-   - Chat ids use `POST /chats/{id}/messages`. Channel ids (`@thread.tacv2`, `@thread.skype`) use `POST /teams/{teamId}/channels/{id}/messages`, which creates a new channel post; the team is resolved from the joined teams, or pass `--team <teamId>`.
-   - The body is HTML: `<p>`, `<br>`, `<b>`, `<i>`, `<s>`, `<code>`, `<pre>`, `<a href>`, `<ul>`/`<ol>`/`<li>`, `<table>`, `<blockquote>`, `<span style>`. Plain newlines are collapsed, so use `<br>` or `<p>`, and escape `<`, `>` and `&` in text.
-   - `--text` sends plain text instead: HTML is escaped and line breaks are kept.
-3. On success the command prints the created message, including `content` as stored by Teams (`<pre>` becomes `<codeblock>`). On failure it exits with status 1 and prints the error: report it, and check the conversation before any retry so the message is never posted twice.
-4. Apply the post-send verification below.
+   It prints `displayedTitle` (null when the conversation is not displayed), `kind`, `html`, the resolved `mentions` (`firstName`, `displayName`), a readable `preview` text and an `approval` code. Chat ids post to `POST /chats/{id}/messages`; channel ids (`@thread.tacv2`, `@thread.skype`) post a new channel post to `POST /teams/{teamId}/channels/{id}/messages`, with the team resolved from the joined teams or given with `--team <teamId>`.
+4. APPROVAL BEFORE SENDING (ABSOLUTE): show the user in the CLI the destination (`displayedTitle`, or the `conversationId` and `kind`), the `preview` text verbatim in a code block, and who each mention resolved to; mention any formatting the text preview cannot show (bold, colors, tables). Then ask for approval and END YOUR TURN. Never run `send` in the same turn as the preview, and never without the user's explicit approval of that exact preview. If the user asks for a change, edit the file, preview again and ask again.
+5. Once approved, send exactly the previewed message with its approval code:
+   ```bash
+   python3 __TEAMS_DIR__/teams_graph.py send '<conversationId>' --file /tmp/teams-message.html --mention 'Marie Boudet' --approval '<approval>'
+   ```
+   Use the same file and options as the preview. `send` refuses to post when the message, conversation or resolved mentions differ from the approved preview; then preview again and get a new approval.
+6. On success the command prints the created message, including `content` as stored by Teams (`<pre>` becomes `<codeblock>`) and the posted `mentions`. On failure it exits with status 1 and prints the error: report it, and check the conversation before any retry so the message is never posted twice.
+7. Apply the post-send verification below.
 
-Use the compose-box fallback only for what this command does not cover: @mentions, replies inside an existing channel post, and file or image attachments.
+Use the compose-box fallback only for what this command does not cover: replies inside an existing channel post, and file or image attachments. The approval rule of step 4 applies there too: show the exact message and wait for approval before pasting it.
 
 ## Post-send verification (ABSOLUTE — always re-read yourself)
 - AFTER sending any message, ALWAYS re-read what was actually posted to confirm the rendered result matches what you intended. Do not assume it worked.
 - Use take_snapshot to check the text content. If the message involves ANY visual formatting you cannot judge from the DOM text (colors, highlights, table layout, images), take a REAL X11 screenshot via `~/binPerso/teams-screenshot.sh` (NOT take_screenshot) — the a11y snapshot does NOT convey colors, and CDP take_screenshot is not color-faithful.
 - Never describe or announce a visual effect (a color, a highlight) you have not verified survived the render. Teams' sanitizer silently drops some styles; what you pasted is not necessarily what shows.
-- If the render differs from the intent, fix it (edit or repost) rather than leaving a wrong/misleading message.
+- If the render differs from the intent, fix it (edit, or repost after a new approval) rather than leaving a wrong/misleading message.
 - When the target conversation is not displayed, do not switch the user's view to check it: rely on the `content` returned by `teams_graph.py` and say that the visual render was not checked.
 
 ## Colors and highlighting (HTML — X11-verified)
@@ -89,7 +95,7 @@ When typing messages in the Teams compose box, Teams uses a rich text editor wit
   2. Use `evaluate_script` to write text to clipboard: `navigator.clipboard.writeText("your message")`
   3. Use `press_key` with Ctrl+V to paste
   4. Verify the content landed in the RIGHT compose box before sending (X11 screenshot via `~/binPerso/teams-screenshot.sh`, or take_snapshot for plain text)
-  5. Press Enter to send
+  5. Press Enter to send, only after the user approved the exact message (Graph step 4)
 - For FORMATTED messages (tables, lists, bold, etc.), do NOT use `writeText` (plain text) — Teams would show the raw markdown/source literally (ugly). Instead write **rich HTML** to the clipboard so Teams' rich editor renders it on paste:
   ```js
   const html = '<b>Title</b><table border="1"><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>';

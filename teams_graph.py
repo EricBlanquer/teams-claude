@@ -4,8 +4,10 @@ import argparse
 import asyncio
 import html
 import json
+import re
 import sys
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -17,6 +19,10 @@ TEAMS_HOSTS = {"teams.cloud.microsoft", "teams.microsoft.com"}
 PAGE_SCRIPT = Path(__file__).with_name("teams_graph.js")
 TIMEOUT_SECONDS = 60
 EVALUATE_ID = 1
+BLOCK_TAGS = {"p", "div", "blockquote", "pre", "codeblock", "table", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6"}
+PREFORMATTED_TAGS = {"pre", "codeblock"}
+LIST_TAGS = {"ul", "ol"}
+CELL_TAGS = {"td", "th"}
 
 
 class TeamsGraphError(Exception):
@@ -39,6 +45,76 @@ def message_html(content, plain_text):
     if not content.strip():
         raise TeamsGraphError("The message is empty")
     return content
+
+
+class TextRenderer(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.lists = []
+        self.preformatted = 0
+        self.cells = 0
+
+    def write(self, text):
+        if not self.preformatted:
+            text = re.sub(r"\s+", " ", text)
+            if not self.parts or self.parts[-1].endswith("\n"):
+                text = text.lstrip(" ")
+        if text:
+            self.parts.append(text)
+
+    def starts_line(self, tag):
+        return tag in BLOCK_TAGS and not (tag in LIST_TAGS and self.lists)
+
+    def handle_starttag(self, tag, attrs):
+        if self.starts_line(tag):
+            self.parts.append("\n")
+        if tag in PREFORMATTED_TAGS:
+            self.preformatted += 1
+        if tag in LIST_TAGS:
+            self.lists.append([tag, 0])
+        elif tag == "li":
+            if not self.lists:
+                self.lists.append(["ul", 0])
+            self.lists[-1][1] += 1
+            marker = "- " if self.lists[-1][0] == "ul" else f"{self.lists[-1][1]}. "
+            self.parts.append("\n" + "  " * (len(self.lists) - 1) + marker)
+        elif tag == "br":
+            self.parts.append("\n")
+        elif tag == "tr":
+            self.parts.append("\n")
+            self.cells = 0
+        elif tag in CELL_TAGS:
+            if self.cells:
+                self.parts[-1] = self.parts[-1].rstrip(" ")
+                self.parts.append(" | ")
+            self.cells += 1
+        elif tag == "blockquote":
+            self.parts.append("> ")
+        elif tag == "at":
+            self.parts.append("@")
+
+    def handle_endtag(self, tag):
+        if tag in LIST_TAGS and self.lists:
+            self.lists.pop()
+        if self.starts_line(tag):
+            self.parts.append("\n")
+        if tag in PREFORMATTED_TAGS:
+            self.preformatted = max(self.preformatted - 1, 0)
+
+    def handle_data(self, data):
+        self.write(data)
+
+    def text(self):
+        lines = [line.rstrip() for line in "".join(self.parts).split("\n")]
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip("\n")
+
+
+def html_to_text(content):
+    renderer = TextRenderer()
+    renderer.feed(content)
+    renderer.close()
+    return renderer.text()
 
 
 def page_expression(request):
@@ -89,27 +165,44 @@ def read_message(path):
     return sys.stdin.read()
 
 
+def add_message_arguments(command):
+    command.add_argument("conversation_id", help="chat id, or channel id (@thread.tacv2 / @thread.skype)")
+    command.add_argument("--team", help="team id of the channel, resolved from the joined teams when omitted")
+    command.add_argument("--file", type=Path, help="file containing the message")
+    command.add_argument("--text", action="store_true", help="treat the message as plain text instead of HTML")
+    command.add_argument(
+        "--mention", action="append", default=[], metavar="NAME",
+        help="mention the conversation member matching NAME by first name; the message must contain @NAME where it goes",
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Post Teams messages through Microsoft Graph with the signed-in Teams session")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("current", help="print the conversation displayed in Teams")
-    send = commands.add_parser("send", help="post an HTML message read from stdin or --file")
-    send.add_argument("conversation_id", help="chat id, or channel id (@thread.tacv2 / @thread.skype)")
-    send.add_argument("--team", help="team id of the channel, resolved from the joined teams when omitted")
-    send.add_argument("--file", type=Path, help="file containing the message")
-    send.add_argument("--text", action="store_true", help="treat the message as plain text instead of HTML")
+    preview = commands.add_parser("preview", help="resolve and print a message and its approval code without posting it")
+    send = commands.add_parser("send", help="post a message the user approved after its preview")
+    for command in (preview, send):
+        add_message_arguments(command)
+    send.add_argument("--approval", required=True, metavar="CODE", help="approval code printed by preview for this exact message")
     args = parser.parse_args(argv)
     try:
         if args.command == "current":
             request = {"action": "current"}
         else:
             request = {
-                "action": "send",
+                "action": args.command,
                 "conversationId": args.conversation_id,
                 "teamId": args.team,
                 "html": message_html(read_message(args.file), args.text),
+                "mentions": args.mention,
             }
-        print(json.dumps(run(request), ensure_ascii=False, indent=2))
+            if args.command == "send":
+                request["approval"] = args.approval
+        result = run(request)
+        if args.command == "preview":
+            result["preview"] = html_to_text(result["html"])
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     except (TeamsGraphError, OSError) as ex:
         print(f"teams_graph: {ex}", file=sys.stderr)
         return 1
