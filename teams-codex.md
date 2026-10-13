@@ -7,7 +7,7 @@ IMPORTANT: the user may switch Teams conversations between messages. On EVERY ne
 Chrome DevTools `take_screenshot` (CDP) is NOT color-faithful — it misrenders colors (observed: a green shown as white) and can hide text-color/highlight failures. Do NOT use it to judge colors, highlights, or fine visual details.
 
 Instead capture the real X11 render, limited to the Teams window:
-- Run `~/binPerso/teams-screenshot.sh <output.png>` — it grabs the full screen with `gnome-screenshot`, finds the visible Teams window of the current workspace with `wmctrl` and crops to its client area from `xwininfo` (so the PNG contains ONLY the Teams window, without its title bar; `wmctrl -lG` offsets it by the frame), deletes the full-screen intermediate, and prints the output path, dimensions and size.
+- Run `~/binPerso/teams-screenshot.sh <output.png>` — it finds the visible Teams window with `wmctrl` and captures its client area with ImageMagick `import -window` (so the PNG contains ONLY the Teams window, without its title bar, and stays correct when another window covers it), then prints the output path, dimensions and size.
 - Then Read the produced PNG. For small text/colors, crop+upscale the region of interest with PIL (`Image.crop(...).resize(...)`) before Reading.
 - This is the ONLY reliable way to verify what the user actually sees. When a color/highlight matters, trust this — or ask the user to confirm from their own screen.
 
