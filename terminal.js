@@ -15,8 +15,9 @@
         var target = provider === 'codex' ? 'claude' : 'codex';
         var button = document.createElement('button');
         button.type = 'button';
-        button.textContent = target === 'claude' ? 'Claude' : 'Codex';
-        button.title = 'Switch to ' + button.textContent;
+        var targetLabel = target === 'claude' ? 'Claude' : 'Codex';
+        button.textContent = '⇄ ' + targetLabel;
+        button.title = 'Switch to ' + targetLabel;
         button.setAttribute('aria-label', button.title);
         button.dataset.assistantSwitch = target;
         button.style.cssText = 'background:none;border:1px solid #888;color:inherit;cursor:pointer;border-radius:3px;padding:1px 8px;font:inherit;';

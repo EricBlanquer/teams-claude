@@ -124,7 +124,8 @@ test('live installation preserves the existing Codex terminal without opening a 
     const env = environment(undefined, true);
     assert.equal(env.sockets.length, 0);
     const button = env.elements.find(node => node.dataset.assistantSwitch === 'claude');
-    assert.equal(button.textContent, 'Claude');
+    assert.equal(button.textContent, '⇄ Claude');
+    assert.equal(button.title, 'Switch to Claude');
     assert.equal(env.document.getElementById('codex-terminal-panel').style.height, '350px');
     vm.runInContext(source, env.context);
     assert.equal(env.elements.filter(node => node.dataset.assistantSwitch).length, 1);
