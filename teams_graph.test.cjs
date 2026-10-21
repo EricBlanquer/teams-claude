@@ -7,30 +7,87 @@ const source = fs.readFileSync(`${__dirname}/teams_graph.js`, 'utf8');
 const NOW_SECONDS = 1_800_000_000;
 const ACCOUNT = 'user-id.tenant-id';
 const SEND_SCOPES = 'openid https://graph.microsoft.com/ChatMessage.Send https://graph.microsoft.com/ChannelMessage.Send';
+const CHAT_SCOPES = 'https://ic3.teams.office.com/Teams.AccessAsUser.All https://ic3.teams.office.com/.default';
 const CHAT_ID = '19:abc_def@unq.gbl.spaces';
 const CHANNEL_ID = '19:channel@thread.tacv2';
+const GRAPH = 'https://graph.microsoft.com/v1.0';
+const CHAT_SERVICE = 'https://teams.example/api/chatsvc/emea';
+const ME_URL = '/me?$select=id,displayName';
+const TOKEN_URL = 'POST https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token';
+const CHAT_MESSAGES = `POST ${GRAPH}/chats/${encodeURIComponent(CHAT_ID)}/messages`;
+const CHAT_MEMBERS = `GET ${GRAPH}/chats/${encodeURIComponent(CHAT_ID)}/members`;
+const CHANNEL_PATH = `${GRAPH}/teams/team-x/channels/${encodeURIComponent(CHANNEL_ID)}`;
 
 function accessToken(secret, expiresOn, target = SEND_SCOPES, homeAccountId = ACCOUNT) {
     return {credentialType: 'AccessToken', homeAccountId, target, secret, expiresOn: String(expiresOn)};
+}
+
+function chatToken(secret = 'chat-token', expiresOn = NOW_SECONDS + 3600) {
+    return accessToken(secret, expiresOn, CHAT_SCOPES);
 }
 
 function refreshToken(homeAccountId = ACCOUNT) {
     return {credentialType: 'RefreshToken', homeAccountId, clientId: 'teams-client', secret: 'refresh-secret'};
 }
 
+const VALID_TOKENS = [accessToken('graph-token', NOW_SECONDS + 3600), chatToken()];
+
 function jsonResponse(status, payload) {
     return {ok: status >= 200 && status < 300, status, json: async () => payload};
 }
 
-function environment({credentials = [], routes = {}, elements = [], title = null, documentTitle = 'Chat | Teams'} = {}) {
-    const entries = [...credentials.map(credential => JSON.stringify(credential)), 'not json', 'true'];
+function found(body) {
+    return {status: 200, body};
+}
+
+function conversationUrl(conversationId) {
+    return `${CHAT_SERVICE}/v1/users/ME/conversations/${encodeURIComponent(conversationId)}`;
+}
+
+function conversation(id, threadProperties = {}, extra = {}) {
+    return {id, threadProperties, ...extra};
+}
+
+const DEFAULT_CONVERSATIONS = [
+    conversation(CHAT_ID, {topic: 'Projet', productThreadType: 'Chat'}),
+    conversation(CHANNEL_ID, {topic: 'General', groupId: 'team-x', productThreadType: 'TeamsStandardChannel'}),
+    conversation('48:notes', {productThreadType: 'StreamOfNotes'}),
+];
+
+function environment({
+    credentials = VALID_TOKENS, regions = [CHAT_SERVICE], conversations = DEFAULT_CONVERSATIONS, graph = {}, routes = {},
+    elements = [], title = null, documentTitle = 'Chat | Teams',
+} = {}) {
+    const entries = [
+        ...credentials.map((credential, index) => [`credential-${index}`, JSON.stringify(credential)]),
+        ...regions.map((region, index) => [`tmp.auth.v1.user-${index}.Discover.DISCOVER-REGION-GTM`, JSON.stringify({item: {chatServiceAfd: region}})]),
+        ['broken', 'not json'],
+        ['flag', 'true'],
+    ];
     const requests = [];
     const writes = [];
+    const listeners = [];
+    const removed = [];
+    const graphObjects = {[ME_URL]: found({id: 'me', displayName: 'Eric Blanquer'}), ...graph};
+    const allRoutes = {
+        [`POST ${GRAPH}/$batch`]: (url, init) => jsonResponse(200, {
+            responses: JSON.parse(init.body).requests.map(request => ({
+                id: request.id, ...(graphObjects[request.url] || {status: 404, body: {error: {code: 'NotFound'}}}),
+            })),
+        }),
+        ...Object.fromEntries(conversations.map(item => [`GET ${conversationUrl(item.id)}`, jsonResponse(200, item)])),
+        ...routes,
+    };
+    const window = {
+        addEventListener: (type, listener, capture) => listeners.push({type, listener, capture}),
+        removeEventListener: (type, listener, capture) => removed.push({type, listener, capture}),
+    };
     const context = {
+        window,
         localStorage: {
             length: entries.length,
-            key: index => `key-${index}`,
-            getItem: key => entries[Number(key.slice(4))],
+            key: index => entries[index][0],
+            getItem: key => (entries.find(entry => entry[0] === key) || [])[1] ?? null,
             setItem: (...args) => writes.push(args),
         },
         document: {
@@ -39,15 +96,32 @@ function environment({credentials = [], routes = {}, elements = [], title = null
             querySelector: selector => (selector === '[data-tid="chat-title"]' ? title : null),
         },
         fetch: async (url, init = {}) => {
-            requests.push({url, method: init.method, headers: init.headers, body: init.body});
-            const route = routes[`${init.method} ${url.split('?')[0]}`];
+            requests.push({url, method: init.method || 'GET', headers: init.headers, body: init.body});
+            const route = allRoutes[`${init.method || 'GET'} ${url.split('?')[0]}`];
             if (!route) throw new Error(`Unexpected request ${init.method} ${url}`);
             return typeof route === 'function' ? route(url, init) : route;
         },
-        URLSearchParams, TextEncoder, crypto, Date: {now: () => NOW_SECONDS * 1000},
+        URLSearchParams, TextEncoder, crypto, Date,
+    };
+    context.Date = class extends Date {
+        static now() {
+            return NOW_SECONDS * 1000;
+        }
     };
     vm.createContext(context);
-    return {teamsGraph: vm.runInContext(source, context), requests, writes};
+    const teamsGraph = vm.runInContext(source, context);
+    return {
+        teamsGraph, requests, writes, window, listeners, removed,
+        press: event => listeners.forEach(entry => entry.listener({key: 'Enter', ...event})),
+        setDisplayed: (newElements, newTitle) => {
+            elements = newElements;
+            title = newTitle;
+        },
+    };
+}
+
+function plain(value) {
+    return JSON.parse(JSON.stringify(value));
 }
 
 async function approvedSend(env, request) {
@@ -60,71 +134,99 @@ function threadElement(id, type) {
     return {getAttribute: name => ({'data-track-thread-id': id, 'data-track-thread-type': type}[name] ?? null)};
 }
 
-const CHAT_MESSAGES = `POST https://graph.microsoft.com/v1.0/chats/${encodeURIComponent(CHAT_ID)}/messages`;
+function posts(env) {
+    return env.requests.filter(request => request.method === 'POST' && !request.url.endsWith('/$batch') && !request.url.includes('login.'));
+}
 
-test('sends HTML to a chat with the freshest cached Graph token', async () => {
+function postedBody(env) {
+    return JSON.parse(posts(env)[0].body);
+}
+
+function batchedUrls(env) {
+    return env.requests
+        .filter(request => request.url.endsWith('/$batch'))
+        .map(request => JSON.parse(request.body).requests.map(item => item.url));
+}
+
+test('sends HTML to a chat with the freshest cached tokens', async () => {
     const env = environment({
         credentials: [
             accessToken('older', NOW_SECONDS + 600),
             accessToken('fresh', NOW_SECONDS + 3600),
             accessToken('expiring', NOW_SECONDS + 30),
             accessToken('no-send-scope', NOW_SECONDS + 7200, 'https://graph.microsoft.com/User.Read'),
+            chatToken('chat-older', NOW_SECONDS + 600),
+            chatToken('chat-fresh', NOW_SECONDS + 3600),
             refreshToken(),
         ],
         routes: {[CHAT_MESSAGES]: jsonResponse(201, {id: '42', createdDateTime: 'date', body: {content: '<b>hi</b>'}})},
     });
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '<b>hi</b>'});
-    assert.deepEqual(JSON.parse(JSON.stringify(outcome)), {
+    assert.deepEqual(plain(outcome), {
         ok: true,
-        result: {kind: 'chat', conversationId: CHAT_ID, messageId: '42', createdDateTime: 'date', content: '<b>hi</b>', mentions: []},
+        result: {
+            kind: 'chat', conversationId: CHAT_ID, threadType: 'Chat', title: 'Projet',
+            messageId: '42', createdDateTime: 'date', content: '<b>hi</b>', mentions: [],
+        },
     });
-    assert.equal(env.requests.length, 1);
-    assert.equal(env.requests[0].headers.Authorization, 'Bearer fresh');
-    assert.deepEqual(JSON.parse(env.requests[0].body), {body: {contentType: 'html', content: '<b>hi</b>'}});
+    assert.equal(posts(env).length, 1);
+    assert.equal(posts(env)[0].headers.Authorization, 'Bearer fresh');
+    assert.deepEqual(postedBody(env), {body: {contentType: 'html', content: '<b>hi</b>'}});
+    const chatServiceRequests = env.requests.filter(request => request.url.startsWith(CHAT_SERVICE));
+    assert.ok(chatServiceRequests.length);
+    assert.ok(chatServiceRequests.every(request => request.headers.Authorization === 'Bearer chat-fresh'));
 });
 
 test('refreshes the Graph token without touching the Teams cache when cached tokens expire', async () => {
     const env = environment({
-        credentials: [accessToken('expired', NOW_SECONDS + 60), refreshToken()],
+        credentials: [accessToken('expired', NOW_SECONDS + 60), chatToken(), refreshToken()],
         routes: {
-            'POST https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token': jsonResponse(200, {
-                access_token: 'refreshed', scope: SEND_SCOPES,
-            }),
+            [TOKEN_URL]: jsonResponse(200, {access_token: 'refreshed', scope: SEND_SCOPES}),
             [CHAT_MESSAGES]: jsonResponse(201, {id: '43'}),
         },
     });
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'});
-    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok, true, outcome.error);
     const refresh = Object.fromEntries(env.requests[0].body);
     assert.equal(refresh.grant_type, 'refresh_token');
     assert.equal(refresh.refresh_token, 'refresh-secret');
     assert.equal(refresh.client_id, 'teams-client');
     assert.match(refresh.scope, /^https:\/\/graph\.microsoft\.com\/\.default /);
-    assert.equal(env.requests.find(request => request.url.includes('/chats/')).headers.Authorization, 'Bearer refreshed');
+    assert.equal(posts(env)[0].headers.Authorization, 'Bearer refreshed');
     assert.deepEqual(env.writes, []);
 });
 
-test('reports a refresh failure without leaking token values', async () => {
+test('refreshes the chat service token with its own scope', async () => {
     const env = environment({
-        credentials: [refreshToken()],
-        routes: {'POST https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token': jsonResponse(400, {error: 'invalid_grant'})},
+        credentials: [accessToken('graph-token', NOW_SECONDS + 3600), chatToken('expired', NOW_SECONDS + 60), refreshToken()],
+        routes: {[TOKEN_URL]: jsonResponse(200, {access_token: 'chat-refreshed', scope: CHAT_SCOPES})},
     });
+    const outcome = await env.teamsGraph({action: 'preview', conversationId: CHAT_ID, html: 'hi'});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.match(Object.fromEntries(env.requests[0].body).scope, /^https:\/\/ic3\.teams\.office\.com\/\.default /);
+    assert.equal(env.requests.find(request => request.url.startsWith(CHAT_SERVICE)).headers.Authorization, 'Bearer chat-refreshed');
+});
+
+test('reports a refresh failure without leaking token values', async () => {
+    const env = environment({credentials: [refreshToken()], routes: {[TOKEN_URL]: jsonResponse(400, {error: 'invalid_grant'})}});
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'});
     assert.deepEqual({...outcome}, {ok: false, error: 'Graph token refresh failed with HTTP 400 invalid_grant'});
 });
 
-test('rejects a refreshed token that cannot send messages', async () => {
-    const env = environment({
+test('rejects refreshed tokens that lack the required scopes', async () => {
+    const graphEnv = environment({
         credentials: [refreshToken()],
-        routes: {
-            'POST https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token': jsonResponse(200, {
-                access_token: 'read-only', scope: 'https://graph.microsoft.com/User.Read',
-            }),
-        },
+        routes: {[TOKEN_URL]: jsonResponse(200, {access_token: 'read-only', scope: 'https://graph.microsoft.com/User.Read'})},
     });
-    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'});
-    assert.deepEqual({...outcome}, {ok: false, error: 'The refreshed Graph token cannot send Teams messages'});
-    assert.equal(env.requests.length, 1);
+    const graphOutcome = await approvedSend(graphEnv, {conversationId: CHAT_ID, html: 'hi'});
+    assert.deepEqual({...graphOutcome}, {ok: false, error: 'The refreshed Graph token cannot send Teams messages'});
+    assert.equal(graphEnv.requests.length, 1);
+    const chatEnv = environment({
+        credentials: [accessToken('graph-token', NOW_SECONDS + 3600), refreshToken()],
+        routes: {[TOKEN_URL]: jsonResponse(200, {access_token: 'other', scope: SEND_SCOPES})},
+    });
+    const chatOutcome = await chatEnv.teamsGraph({action: 'read', conversationId: CHAT_ID});
+    assert.deepEqual({...chatOutcome}, {ok: false, error: 'The refreshed Teams chat service token cannot read conversations'});
 });
 
 test('refuses to choose between several cached accounts', async () => {
@@ -137,81 +239,71 @@ test('refuses to choose between several cached accounts', async () => {
     assert.equal(env.requests.length, 0);
 });
 
-test('posts to a channel after resolving its team from the joined teams', async () => {
-    const teamsUrl = 'https://graph.microsoft.com/v1.0/teams';
+test('requires exactly one cached chat service region', async () => {
+    const missing = await environment({regions: []}).teamsGraph({action: 'read', conversationId: CHAT_ID});
+    assert.equal(missing.error, 'The Teams chat service region is not cached');
+    const several = await environment({regions: [CHAT_SERVICE, 'https://other.example']}).teamsGraph({action: 'read', conversationId: CHAT_ID});
+    assert.equal(several.error, 'Several Teams chat service regions are cached');
+});
+
+test('posts to a channel with the team given by the chat service', async () => {
     const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
-        routes: {
-            'GET https://graph.microsoft.com/v1.0/me/joinedTeams': jsonResponse(200, {
-                value: [{id: 'team-a'}, {id: 'team-b'}, {id: 'team-c'}],
-            }),
-            [`GET ${teamsUrl}/team-a/channels`]: jsonResponse(200, {
-                value: [{id: '19:other@thread.tacv2'}], '@odata.nextLink': `${teamsUrl}/team-a/channels/next`,
-            }),
-            [`GET ${teamsUrl}/team-a/channels/next`]: jsonResponse(200, {value: [{id: CHANNEL_ID}]}),
-            [`GET ${teamsUrl}/team-b/channels`]: jsonResponse(200, {value: [{id: '19:more@thread.tacv2'}]}),
-            [`GET ${teamsUrl}/team-c/channels`]: jsonResponse(403, {error: {code: 'Forbidden'}}),
-            [`POST ${teamsUrl}/team-a/channels/${encodeURIComponent(CHANNEL_ID)}/messages`]: jsonResponse(201, {id: '44'}),
+        graph: {
+            '/teams/team-x?$select=displayName': found({displayName: 'Infinity'}),
+            [`/teams/team-x/channels/${encodeURIComponent(CHANNEL_ID)}?$select=displayName`]: found({displayName: 'Général'}),
         },
+        routes: {[`POST ${CHANNEL_PATH}/messages`]: jsonResponse(201, {id: '44'})},
     });
     const outcome = await approvedSend(env, {conversationId: CHANNEL_ID, html: 'hi'});
-    assert.equal(outcome.ok, true);
+    assert.equal(outcome.ok, true, outcome.error);
     assert.equal(outcome.result.kind, 'channel');
-    assert.equal(outcome.result.teamId, 'team-a');
+    assert.equal(outcome.result.teamId, 'team-x');
+    assert.equal(outcome.result.title, 'Infinity > Général');
     assert.equal(outcome.result.messageId, '44');
 });
 
-test('uses the given team id for a channel without listing teams', async () => {
-    const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
-        routes: {
-            [`POST https://graph.microsoft.com/v1.0/teams/team-x/channels/${encodeURIComponent('19:old@thread.skype')}/messages`]:
-                jsonResponse(201, {id: '45'}),
-        },
-    });
-    const outcome = await approvedSend(env, {conversationId: '19:old@thread.skype', teamId: 'team-x', html: 'hi'});
-    assert.equal(outcome.ok, true);
-    assert.equal(env.requests.length, 1);
+test('replies inside a channel post', async () => {
+    const env = environment({routes: {[`POST ${CHANNEL_PATH}/messages/123/replies`]: jsonResponse(201, {id: '45'})}});
+    const outcome = await approvedSend(env, {conversationId: CHANNEL_ID, replyTo: '123', html: 'hi'});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.replyTo, '123');
+    assert.equal(outcome.result.messageId, '45');
 });
 
-test('explains when a channel is missing from the joined teams', async () => {
-    const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
-        routes: {
-            'GET https://graph.microsoft.com/v1.0/me/joinedTeams': jsonResponse(200, {value: [{id: 'team-a'}]}),
-            'GET https://graph.microsoft.com/v1.0/teams/team-a/channels': jsonResponse(429, {error: {code: 'TooManyRequests', message: 'Slow down'}}),
-        },
-    });
-    const outcome = await approvedSend(env, {conversationId: CHANNEL_ID, html: 'hi'});
-    assert.equal(outcome.ok, false);
-    assert.match(outcome.error, /^Channel not found in the joined teams \(1 team listings failed: .*HTTP 429 TooManyRequests: Slow down\), pass the team id$/);
+test('refuses replies outside channels and channels without a team', async () => {
+    const chat = await environment().teamsGraph({action: 'preview', conversationId: CHAT_ID, replyTo: '123', html: 'hi'});
+    assert.equal(chat.error, 'Replies are only supported in channel posts');
+    const env = environment({conversations: [conversation(CHANNEL_ID, {topic: 'General'})]});
+    const orphan = await env.teamsGraph({action: 'preview', conversationId: CHANNEL_ID, html: 'hi'});
+    assert.equal(orphan.error, `The team of channel ${CHANNEL_ID} is unknown`);
+    assert.equal(posts(env).length, 0);
 });
 
-test('surfaces Graph errors with their code and message', async () => {
-    const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
-        routes: {[CHAT_MESSAGES]: jsonResponse(403, {error: {code: 'Forbidden', message: 'Denied'}})},
-    });
-    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'});
-    assert.equal(outcome.ok, false);
-    assert.match(outcome.error, /failed with HTTP 403 Forbidden: Denied$/);
+test('surfaces service errors with their code and message', async () => {
+    const graphEnv = environment({routes: {[CHAT_MESSAGES]: jsonResponse(403, {error: {code: 'Forbidden', message: 'Denied'}})}});
+    const graphOutcome = await approvedSend(graphEnv, {conversationId: CHAT_ID, html: 'hi'});
+    assert.equal(graphOutcome.ok, false);
+    assert.match(graphOutcome.error, /^Graph POST .*\/messages failed with HTTP 403 Forbidden: Denied$/);
+    const chatEnv = environment({conversations: [], routes: {[`GET ${conversationUrl(CHAT_ID)}`]: jsonResponse(404, {message: 'Not found'})}});
+    const chatOutcome = await chatEnv.teamsGraph({action: 'read', conversationId: CHAT_ID});
+    assert.match(chatOutcome.error, /^Teams chat service GET .* failed with HTTP 404: Not found$/);
 });
 
-test('rejects an empty message before calling Graph', async () => {
-    const env = environment({credentials: [accessToken('token', NOW_SECONDS + 3600)]});
+test('rejects an empty message before any request', async () => {
+    const env = environment();
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: ''});
     assert.deepEqual({...outcome}, {ok: false, error: 'The message is empty'});
     assert.equal(env.requests.length, 0);
 });
 
-test('describes the displayed conversation from the compose box', async () => {
+test('describes the displayed conversation when no request was captured', async () => {
     const env = environment({
         elements: [threadElement('', null), threadElement(CHAT_ID, 'OneOnOneChat'), threadElement(CHAT_ID, 'OneOnOneChat')],
-        title: {innerText: '  Alice  '},
+        title: {innerText: '  Alice  \nExterne'},
     });
     const outcome = await env.teamsGraph({action: 'current'});
-    assert.deepEqual(JSON.parse(JSON.stringify(outcome)), {
-        ok: true, result: {kind: 'chat', conversationId: CHAT_ID, threadType: 'OneOnOneChat', title: 'Alice'},
+    assert.deepEqual(plain(outcome), {
+        ok: true, result: {source: 'display', kind: 'chat', conversationId: CHAT_ID, threadType: 'OneOnOneChat', title: 'Alice'},
     });
 });
 
@@ -229,8 +321,56 @@ test('refuses ambiguous or missing displayed conversations', async () => {
     assert.equal(several.error, `Several Teams conversations are displayed: ${CHAT_ID}, ${CHANNEL_ID}`);
 });
 
-const GRAPH = 'https://graph.microsoft.com/v1.0';
-const CHAT_MEMBERS = `GET ${GRAPH}/chats/${encodeURIComponent(CHAT_ID)}/members`;
+function terminalTarget(inside = true) {
+    return {closest: selector => (inside && selector === '[id$="-terminal-panel"]' ? {} : null)};
+}
+
+test('keeps the conversation displayed when the request was submitted', async () => {
+    const env = environment({elements: [threadElement(CHAT_ID, 'GroupChat')], title: {innerText: 'Projet'}});
+    env.press({target: terminalTarget()});
+    env.setDisplayed([threadElement(CHANNEL_ID, 'Channel')], {innerText: 'Général'});
+    env.press({target: terminalTarget(), shiftKey: true});
+    env.press({target: terminalTarget(false)});
+    env.press({key: 'a', target: terminalTarget()});
+    env.press({target: terminalTarget(), isComposing: true});
+    const outcome = await env.teamsGraph({action: 'current'});
+    assert.deepEqual(plain(outcome.result), {
+        source: 'prompt', capturedAt: new Date(NOW_SECONDS * 1000).toISOString(),
+        kind: 'chat', conversationId: CHAT_ID, threadType: 'GroupChat', title: 'Projet',
+        displayedNow: {conversationId: CHANNEL_ID, title: 'Général'},
+    });
+});
+
+test('omits the displayed conversation when it is the captured one and flags an empty view', async () => {
+    const env = environment({elements: [threadElement(CHAT_ID, 'GroupChat')], title: {innerText: 'Projet'}});
+    env.press({target: terminalTarget()});
+    assert.equal('displayedNow' in (await env.teamsGraph({action: 'current'})).result, false);
+    env.setDisplayed([], null);
+    assert.equal((await env.teamsGraph({action: 'current'})).result.displayedNow, null);
+});
+
+test('reports a request submitted while no conversation was displayed', async () => {
+    const env = environment();
+    env.press({target: terminalTarget()});
+    env.setDisplayed([threadElement(CHAT_ID, 'GroupChat')], {innerText: 'Projet'});
+    const outcome = await env.teamsGraph({action: 'current'});
+    assert.equal(outcome.error, 'No Teams conversation was identified when the request was submitted at ' +
+        new Date(NOW_SECONDS * 1000).toISOString() + ': No Teams conversation with a compose box is displayed');
+});
+
+test('replaces the previous capture listener on every evaluation', async () => {
+    const env = environment();
+    assert.deepEqual(env.listeners.map(entry => [entry.type, entry.capture]), [['keydown', true]]);
+    assert.deepEqual(env.removed, []);
+    const previous = env.listeners[0].listener;
+    vm.runInContext(source, vm.createContext(Object.assign(Object.create(null), {
+        window: env.window, document: {}, localStorage: {length: 0}, Date,
+    })));
+    assert.equal(env.removed.length, 1);
+    assert.equal(env.removed[0].listener, previous);
+    assert.equal(env.listeners.length, 2);
+    assert.equal(env.window.__teamsAssistantPromptHandler, env.listeners[1].listener);
+});
 
 function member(userId, displayName, tenantId = 'tenant-id') {
     return {userId, displayName, tenantId};
@@ -244,11 +384,7 @@ function echoMessage(url, init) {
 function mentionEnvironment(members, users = {}, extraRoutes = {}) {
     const routes = {[CHAT_MEMBERS]: jsonResponse(200, {value: members}), [CHAT_MESSAGES]: echoMessage, ...extraRoutes};
     for (const [userId, response] of Object.entries(users)) routes[`GET ${GRAPH}/users/${userId}`] = response;
-    return environment({credentials: [accessToken('token', NOW_SECONDS + 3600)], routes});
-}
-
-function postedBody(env) {
-    return JSON.parse(env.requests.find(request => request.method === 'POST').body);
+    return environment({routes});
 }
 
 test('mentions a chat member by given name only', async () => {
@@ -268,7 +404,7 @@ test('mentions a chat member by given name only', async () => {
             }},
         }],
     });
-    assert.deepEqual(JSON.parse(JSON.stringify(outcome.result.mentions)), [{mentionText: 'Marie', userId: 'u-marie'}]);
+    assert.deepEqual(plain(outcome.result.mentions), [{mentionText: 'Marie', userId: 'u-marie'}]);
 });
 
 test('matches mention names without case or accents and in any order', async () => {
@@ -292,17 +428,17 @@ test('refuses an ambiguous mention without posting', async () => {
     const env = mentionEnvironment([member('u-1', 'Marie Anne Boudet'), member('u-2', 'Marie Boudet'), member(null, 'Marie Phone')]);
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '@Marie', mentions: ['Marie']});
     assert.deepEqual({...outcome}, {ok: false, error: 'Mention "Marie" matches several members: Marie Anne Boudet, Marie Boudet'});
-    assert.equal(env.requests.some(request => request.method === 'POST'), false);
+    assert.equal(posts(env).length, 0);
 });
 
 test('refuses an unknown mention without posting', async () => {
     const env = mentionEnvironment([member('u-1', 'Marie Boudet')]);
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '@Paul', mentions: ['Paul']});
     assert.deepEqual({...outcome}, {ok: false, error: 'Mention "Paul" matches no member of the conversation'});
-    assert.equal(env.requests.some(request => request.method === 'POST'), false);
+    assert.equal(posts(env).length, 0);
 });
 
-test('requires a placeholder for every mention before calling Graph', async () => {
+test('requires a placeholder for every mention before any request', async () => {
     const env = mentionEnvironment([member('u-1', 'Marie Boudet')]);
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '@Mariette @Marie Boudet', mentions: ['Marie', 'Marie Boudet']});
     assert.deepEqual({...outcome}, {ok: false, error: 'The message must contain @Marie where each mention goes'});
@@ -346,13 +482,12 @@ test('stops on unexpected profile errors', async () => {
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '@Tom', mentions: ['Tom']});
     assert.equal(outcome.ok, false);
     assert.match(outcome.error, /HTTP 500 InternalServerError/);
-    assert.equal(env.requests.some(request => request.method === 'POST'), false);
+    assert.equal(posts(env).length, 0);
 });
 
 test('mentions the signed-in user in the self chat', async () => {
     const selfChat = `${GRAPH}/chats/${encodeURIComponent('48:notes')}`;
     const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
         routes: {
             [`GET ${GRAPH}/me`]: jsonResponse(200, {id: 'me', displayName: 'Eric Blanquer'}),
             [`GET ${GRAPH}/users/me`]: jsonResponse(200, {givenName: 'Eric'}),
@@ -361,82 +496,74 @@ test('mentions the signed-in user in the self chat', async () => {
     });
     const outcome = await approvedSend(env, {conversationId: '48:notes', html: '@Eric', mentions: ['Eric']});
     assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.title, 'Eric Blanquer');
     assert.equal(postedBody(env).body.content, '<at id="0">Eric</at>');
     assert.equal('tenantId' in postedBody(env).mentions[0].mentioned.user, false);
 });
 
 test('mentions channel members from the channel member list', async () => {
-    const channel = `${GRAPH}/teams/team-x/channels/${encodeURIComponent(CHANNEL_ID)}`;
     const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
         routes: {
-            [`GET ${channel}/members`]: jsonResponse(200, {value: [member('u-1', 'Marie Boudet')]}),
+            [`GET ${CHANNEL_PATH}/members`]: jsonResponse(200, {value: [member('u-1', 'Marie Boudet')]}),
             [`GET ${GRAPH}/users/u-1`]: jsonResponse(200, {givenName: 'Marie'}),
-            [`POST ${channel}/messages`]: echoMessage,
+            [`POST ${CHANNEL_PATH}/messages`]: echoMessage,
         },
     });
-    const outcome = await approvedSend(env, {conversationId: CHANNEL_ID, teamId: 'team-x', html: '@Marie', mentions: ['Marie']});
+    const outcome = await approvedSend(env, {conversationId: CHANNEL_ID, html: '@Marie', mentions: ['Marie']});
     assert.equal(outcome.ok, true, outcome.error);
     assert.equal(postedBody(env).body.content, '<at id="0">Marie</at>');
 });
 
-test('previews the resolved message without posting it', async () => {
+test('previews the resolved message and its destination without posting it', async () => {
     const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
         routes: {
             [CHAT_MEMBERS]: jsonResponse(200, {value: [member('u-marie', 'Marie Boudet')]}),
             [`GET ${GRAPH}/users/u-marie`]: jsonResponse(200, {givenName: 'Marie'}),
         },
-        elements: [threadElement(CHAT_ID, 'GroupChat')],
-        title: {innerText: 'Projet'},
     });
     const outcome = await env.teamsGraph({action: 'preview', conversationId: CHAT_ID, html: 'Hi @Marie Boudet', mentions: ['Marie Boudet']});
     assert.equal(outcome.ok, true, outcome.error);
-    const {approval, ...preview} = JSON.parse(JSON.stringify(outcome.result));
+    const {approval, ...preview} = plain(outcome.result);
     assert.match(approval, /^[0-9a-f]{12}$/);
     assert.deepEqual(preview, {
-        kind: 'chat', conversationId: CHAT_ID, displayedTitle: 'Projet', html: 'Hi <at id="0">Marie</at>',
+        kind: 'chat', conversationId: CHAT_ID, threadType: 'Chat', title: 'Projet', html: 'Hi <at id="0">Marie</at>',
         mentions: [{mention: 'Marie Boudet', firstName: 'Marie', displayName: 'Marie Boudet'}],
     });
-    assert.equal(env.requests.some(request => request.method === 'POST'), false);
-});
-
-test('leaves the title empty when the previewed conversation is not displayed', async () => {
-    const env = environment({credentials: [accessToken('token', NOW_SECONDS + 3600)], elements: [threadElement(CHANNEL_ID, 'Channel')]});
-    const outcome = await env.teamsGraph({action: 'preview', conversationId: CHAT_ID, html: 'hi'});
-    assert.equal(outcome.result.displayedTitle, null);
-    assert.equal(outcome.result.html, 'hi');
+    assert.equal(posts(env).length, 0);
 });
 
 test('refuses to send without an approval code', async () => {
-    const env = environment({credentials: [accessToken('token', NOW_SECONDS + 3600)]});
+    const env = environment();
     const outcome = await env.teamsGraph({action: 'send', conversationId: CHAT_ID, html: 'hi'});
     assert.deepEqual({...outcome}, {ok: false, error: 'No approval code: preview the message and get the user approval first'});
     assert.equal(env.requests.length, 0);
 });
 
-test('refuses an approval code from another message, conversation or mention', async () => {
+test('refuses an approval code from another message, conversation, reply target or mention', async () => {
+    const other = '19:other@thread.v2';
     const env = environment({
-        credentials: [accessToken('token', NOW_SECONDS + 3600)],
+        conversations: [...DEFAULT_CONVERSATIONS, conversation(other, {topic: 'Other'})],
         routes: {
-            [CHAT_MEMBERS]: jsonResponse(200, {value: [member('u-1', 'Marie Boudet'), member('u-2', 'Marie Curie')]}),
-            [`GET ${GRAPH}/chats/${encodeURIComponent('19:other@thread.v2')}/members`]: jsonResponse(200, {value: [member('u-1', 'Marie Boudet')]}),
+            [`GET ${CHANNEL_PATH}/members`]: jsonResponse(200, {value: [member('u-1', 'Marie Boudet'), member('u-2', 'Marie Curie')]}),
+            [`GET ${GRAPH}/chats/${encodeURIComponent(other)}/members`]: jsonResponse(200, {value: [member('u-1', 'Marie Boudet')]}),
             [`GET ${GRAPH}/users/u-1`]: jsonResponse(200, {givenName: 'Marie'}),
             [`GET ${GRAPH}/users/u-2`]: jsonResponse(200, {givenName: 'Marie'}),
         },
     });
-    const approved = {conversationId: CHAT_ID, html: 'Hi @Boudet', mentions: ['Boudet']};
+    const approved = {conversationId: CHANNEL_ID, replyTo: '1', html: 'Hi @Boudet', mentions: ['Boudet']};
     const {approval} = (await env.teamsGraph({...approved, action: 'preview'})).result;
     const changes = [
         {html: 'Hi @Boudet!'},
-        {conversationId: '19:other@thread.v2'},
+        {conversationId: other, replyTo: undefined},
+        {replyTo: '2'},
+        {replyTo: undefined},
         {html: 'Hi @Curie', mentions: ['Curie']},
     ];
     for (const change of changes) {
         const outcome = await env.teamsGraph({...approved, ...change, action: 'send', approval});
         assert.deepEqual({...outcome}, {ok: false, error: 'The message, conversation or mentions differ from the approved preview'});
     }
-    assert.equal(env.requests.some(request => request.method === 'POST'), false);
+    assert.equal(posts(env).length, 0);
 });
 
 test('resolves each distinct mention name once', async () => {
@@ -448,4 +575,179 @@ test('resolves each distinct mention name once', async () => {
     assert.equal(outcome.ok, true, outcome.error);
     assert.equal(env.requests.filter(request => request.url.endsWith('/users/u-marc?$select=givenName')).length, 1);
     assert.deepEqual(Array.from(outcome.result.mentions, mention => mention.mention), ['Marc', 'Marie Boudet']);
+});
+
+function membersUrl(chatId) {
+    return `/chats/${encodeURIComponent(chatId)}/members`;
+}
+
+function lastMessage(composetime, imdisplayname = 'Someone') {
+    return {lastMessage: {composetime, imdisplayname}};
+}
+
+function listEnvironment(conversations, graph = {}) {
+    return environment({
+        conversations: [],
+        graph,
+        routes: {[`GET ${CHAT_SERVICE}/v1/users/ME/conversations`]: jsonResponse(200, {conversations})},
+    });
+}
+
+test('names conversations from their topic, members, channel or last author', async () => {
+    const env = listEnvironment([
+        conversation('19:one@unq.gbl.spaces', {productThreadType: 'OneToOneChat'}, lastMessage('2026-10-21T07:00:00.0000000Z')),
+        conversation('19:group@thread.v2', {productThreadType: 'Chat'}, lastMessage('2026-10-21T06:00:00Z')),
+        conversation('19:bot@unq.gbl.spaces', {}, lastMessage('2026-10-21T05:00:00Z', 'Jira Cloud​')),
+        conversation('19:mine@unq.gbl.spaces', {}, lastMessage('2026-10-21T04:30:00Z', 'Eric Blanquer')),
+        conversation('19:topic@thread.v2', {topic: '  Release  '}, lastMessage('2026-10-21T04:00:00Z')),
+        conversation('48:notes', {}, lastMessage('2026-10-21T03:00:00Z')),
+        conversation(CHANNEL_ID, {topic: 'Annonces', groupId: 'team-x'}, lastMessage('2026-10-21T02:00:00Z')),
+        conversation('19:general@thread.skype', {groupId: 'team-y'}, lastMessage('2026-10-21T01:00:00Z')),
+        conversation('19:lost@thread.v2', {}, lastMessage('2026-10-21T00:00:00Z')),
+    ], {
+        [membersUrl('19:one@unq.gbl.spaces')]: found({value: [member('me', 'Eric Blanquer'), member('u-1', 'Marie Boudet​')]}),
+        [membersUrl('19:group@thread.v2')]: found({value: ['A', 'B', 'C', 'D', 'E', 'F'].map(name => member(`u-${name}`, name)).concat(member('me', 'Eric'))}),
+        [membersUrl('19:bot@unq.gbl.spaces')]: found({value: [member('me', 'Eric Blanquer')]}),
+        [membersUrl('19:mine@unq.gbl.spaces')]: found({value: [member('me', 'Eric Blanquer')]}),
+        '/teams/team-x?$select=displayName': found({displayName: 'Infinity'}),
+        '/teams/team-y?$select=displayName': found({displayName: 'Social'}),
+        [`/teams/team-y/channels/${encodeURIComponent('19:general@thread.skype')}?$select=displayName`]: found({displayName: 'General'}),
+    });
+    const outcome = await env.teamsGraph({action: 'chats', limit: 20});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.deepEqual(outcome.result.map(item => item.title), [
+        'Marie Boudet', 'A, B, C, D +2', 'Jira Cloud', 'Eric Blanquer', 'Release', 'Eric Blanquer', 'Infinity > Annonces', 'Social > General', null,
+    ]);
+    assert.deepEqual(plain(outcome.result[0]), {
+        kind: 'chat', conversationId: '19:one@unq.gbl.spaces', threadType: 'OneToOneChat', title: 'Marie Boudet',
+        lastActivity: '2026-10-21T07:00:00.000Z', lastAuthor: 'Someone',
+    });
+    assert.equal(outcome.result[6].teamId, 'team-x');
+});
+
+test('lists visible conversations by last activity and resolves only the listed titles', async () => {
+    const env = listEnvironment([
+        conversation('19:old@thread.v2', {}, {properties: {lastimreceivedtime: '2026-10-01T00:00:00Z'}}),
+        conversation('48:mentions', {}, lastMessage('2026-10-21T09:00:00Z')),
+        conversation('19:hidden@thread.v2', {hidden: 'true', topic: 'Hidden'}, lastMessage('2026-10-21T09:00:00Z')),
+        conversation('19:new@thread.v2', {topic: 'New'}, lastMessage('2026-10-21T08:00:00Z')),
+        conversation('19:created@thread.v2', {createdat: '2026-10-10T00:00:00Z'}),
+        conversation('19:unknown@thread.v2', {}),
+    ]);
+    const outcome = await env.teamsGraph({action: 'chats', limit: 2});
+    assert.deepEqual(outcome.result.map(item => item.conversationId), ['19:new@thread.v2', '19:created@thread.v2']);
+    assert.deepEqual(batchedUrls(env), [[ME_URL, membersUrl('19:created@thread.v2')]]);
+    assert.match(env.requests.find(request => request.url.startsWith(CHAT_SERVICE)).url, /\?view=msnp24Equivalent&pageSize=500&startTime=1$/);
+});
+
+test('searches every conversation title without case or accents', async () => {
+    const conversations = Array.from({length: 25}, (unused, index) => conversation(`19:c${index}@thread.v2`, {},
+        lastMessage(`2026-10-${String(25 - index).padStart(2, '0')}T00:00:00Z`)));
+    const graph = Object.fromEntries(conversations.map((item, index) => [membersUrl(item.id),
+        found({value: [member(`u-${index}`, index === 23 ? 'Hélène Dupont' : `Person ${index}`)]})]));
+    const env = listEnvironment(conversations, graph);
+    const outcome = await env.teamsGraph({action: 'chats', query: 'DUPONT helene', limit: 1});
+    assert.deepEqual(outcome.result.map(item => item.title), ['Hélène Dupont']);
+    assert.deepEqual(batchedUrls(env).map(urls => urls.length), [20, 6]);
+});
+
+function messagesUrl(threadId) {
+    return `${conversationUrl(threadId)}/messages`;
+}
+
+function message(id, extra = {}) {
+    return {id, messagetype: 'RichText/Html', content: `<p>${id}</p>`, imdisplayname: 'Alice', composetime: '2026-10-21T07:12:44.0960000Z', ...extra};
+}
+
+test('reads the latest user messages oldest first across pages', async () => {
+    const older = `${messagesUrl(CHAT_ID)}?startTime=1&syncState=abc&pageSize=3`;
+    const env = environment({
+        routes: {
+            [`GET ${messagesUrl(CHAT_ID)}`]: (url) => (url.includes('syncState') ? jsonResponse(200, {
+                messages: [message('3'), message('2'), message('1')], _metadata: {backwardLink: null},
+            }) : jsonResponse(200, {
+                messages: [message('6'), {id: '5', messagetype: 'ThreadActivity/AddMember', content: '<addmember/>'}, message('4')],
+                _metadata: {backwardLink: older},
+            })),
+        },
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID, limit: 3});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.deepEqual(plain(outcome.result.messages).map(item => item.id), ['3', '4', '6']);
+    assert.equal(outcome.result.title, 'Projet');
+    const pages = env.requests.filter(request => request.url.includes('/messages'));
+    assert.match(pages[0].url, /\/messages\?view=msnp24Equivalent%7CsupportsMessageProperties&pageSize=3&startTime=1$/);
+    assert.equal(pages[1].url, older);
+});
+
+test('returns the latest created messages when older ones were updated recently', async () => {
+    const older = `${messagesUrl(CHAT_ID)}?startTime=1&syncState=older`;
+    const routes = {
+        [`GET ${messagesUrl(CHAT_ID)}`]: url => jsonResponse(200, url.includes('syncState') ? {
+            messages: [message('60', {version: '60'}), message('40', {version: '40'})],
+        } : {
+            messages: [message('50', {version: '90'}), message('80', {version: '80'}), message('70', {version: '70'})],
+            _metadata: {backwardLink: older},
+        }),
+    };
+    const two = environment({routes});
+    assert.deepEqual(plain((await two.teamsGraph({action: 'read', conversationId: CHAT_ID, limit: 2})).result.messages).map(item => item.id), ['70', '80']);
+    assert.equal(two.requests.filter(request => request.url.includes('/messages')).length, 1);
+    const three = environment({routes});
+    assert.deepEqual(plain((await three.teamsGraph({action: 'read', conversationId: CHAT_ID, limit: 3})).result.messages).map(item => item.id), ['60', '70', '80']);
+    assert.equal(three.requests.filter(request => request.url.includes('/messages')).length, 2);
+});
+
+test('summarizes message details', async () => {
+    const env = environment({
+        routes: {
+            [`GET ${messagesUrl(CHAT_ID)}`]: jsonResponse(200, {
+                messages: [
+                    message('5', {messagetype: 'Text', content: 'a < b', imdisplayname: '', fromDisplayNameInToken: 'Bob​'}),
+                    message('4', {properties: {files: JSON.stringify([{fileName: 'report.pdf'}, {title: 'notes.txt'}, {}])}}),
+                    message('3', {properties: {deletetime: 1, edittime: 1}, content: ''}),
+                    message('2', {properties: {edittime: 1792529524490, subject: 'Release', files: 'not json'}}),
+                    message('1', {imdisplayname: null, composetime: 'bad', originalarrivaltime: '2026-10-21T07:00:00Z', properties: {files: '[]'}}),
+                ],
+            }),
+        },
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID});
+    assert.deepEqual(plain(outcome.result.messages), [
+        {id: '1', time: '2026-10-21T07:00:00.000Z', author: null, html: '<p>1</p>'},
+        {id: '2', time: '2026-10-21T07:12:44.096Z', author: 'Alice', subject: 'Release', edited: true, html: '<p>2</p>'},
+        {id: '3', time: '2026-10-21T07:12:44.096Z', author: 'Alice', deleted: true},
+        {id: '4', time: '2026-10-21T07:12:44.096Z', author: 'Alice', html: '<p>4</p>', files: ['report.pdf', 'notes.txt']},
+        {id: '5', time: '2026-10-21T07:12:44.096Z', author: 'Bob', text: 'a < b'},
+    ]);
+});
+
+test('reads the replies of a channel post', async () => {
+    const thread = `${CHANNEL_ID};messageid=100`;
+    const env = environment({
+        routes: {[`GET ${messagesUrl(thread)}`]: jsonResponse(200, {messages: [message('101', {rootMessageId: '100'}), message('100', {rootMessageId: '100'})]})},
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHANNEL_ID, threadId: '100'});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.threadId, '100');
+    assert.deepEqual(plain(outcome.result.messages).map(item => [item.id, item.replyTo]), [['100', undefined], ['101', '100']]);
+});
+
+test('refuses reply threads outside channels and foreign paging links', async () => {
+    const thread = await environment().teamsGraph({action: 'read', conversationId: CHAT_ID, threadId: '100'});
+    assert.equal(thread.error, 'Only channel posts have reply threads');
+    const env = environment({
+        routes: {[`GET ${messagesUrl(CHAT_ID)}`]: jsonResponse(200, {messages: [message('1')], _metadata: {backwardLink: 'https://evil.example/steal?x=1'}})},
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID, limit: 5});
+    assert.equal(outcome.error, 'Unexpected Teams chat service link: https://evil.example/steal');
+    assert.equal(env.requests.some(request => request.url.startsWith('https://evil.example')), false);
+});
+
+test('stops paging when the service repeats the same link', async () => {
+    const same = `${messagesUrl(CHAT_ID)}?startTime=1&syncState=loop`;
+    const env = environment({routes: {[`GET ${messagesUrl(CHAT_ID)}`]: jsonResponse(200, {messages: [message('1')], _metadata: {backwardLink: same}})}});
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID, limit: 50});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(env.requests.filter(request => request.url.includes('/messages')).length, 2);
 });

@@ -235,6 +235,9 @@ print("Downloaded xterm.js + addons + CSS")
 with open(os.path.join(TEAMS_DIR, "terminal.js"), encoding="utf-8") as terminal_file:
     TERMINAL_JS = terminal_file.read()
 
+with open(os.path.join(TEAMS_DIR, "teams_graph.js"), encoding="utf-8") as graph_file:
+    TEAMS_GRAPH_JS = graph_file.read()
+
 CLIPBOARD_FIX_JS = r"""
 (function installTeamsClipboardFix() {
   if (window.__teamsClipboardFixHandler) {
@@ -559,6 +562,15 @@ async def inject():
             print("Terminal injection failed:", desc)
         else:
             print("Injection successful!")
+
+        # 4b. Record the conversation displayed whenever the user submits a request in the terminal
+        print("Injecting request conversation capture...")
+        result = await evaluate(ws, TEAMS_GRAPH_JS)
+        if "exceptionDetails" in result.get("result", {}):
+            desc = result["result"]["exceptionDetails"].get("exception", {}).get("description", "unknown")
+            print("Request conversation capture injection failed:", desc)
+        else:
+            print("Request conversation capture injected!")
 
         # 5. Inject clipboard fix (text+image copy enrichment for paste into other apps)
         print("Injecting clipboard fix...")

@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+from datetime import timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -15,6 +16,7 @@ import teams_graph
 
 
 PAGE_PATH = "/devtools/page/teams"
+PARIS_SUMMER = timezone(timedelta(hours=2))
 
 
 class FakeDevTools:
@@ -120,12 +122,54 @@ class HtmlToTextTest(unittest.TestCase):
     def test_keeps_plain_text_messages(self):
         self.assertEqual(teams_graph.html_to_text("a &lt; b<br>second"), "a < b\nsecond")
 
+    def test_renders_teams_mentions_emojis_and_images(self):
+        content = (
+            '<p><span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="0">Marie</span>'
+            '<span itemtype="http://schema.skype.com/Mention" itemid="0"> Boudet</span> et '
+            '<span itemtype="http://schema.skype.com/Mention" itemid="1">Paul</span>, '
+            '<span title="Sourire"><img itemtype="http://schema.skype.com/Emoji" alt="🙂" src="x"></span>'
+            '<img itemtype="http://schema.skype.com/Emoji" src="y"></p>'
+            '<p><img itemtype="http://schema.skype.com/AMSImage" alt="image" src="z"></p>'
+        )
+        self.assertEqual(teams_graph.html_to_text(content), "@Marie Boudet et @Paul, 🙂\n\n[image]")
+
+    def test_prefixes_every_quoted_line(self):
+        content = (
+            '<blockquote itemtype="http://schema.skype.com/Reply"><strong>Anton</strong><span></span>'
+            '<p>first<br>second</p></blockquote><p>answer</p>'
+        )
+        self.assertEqual(teams_graph.html_to_text(content), "> Anton\n> first\n> second\n\nanswer")
+
+
+class ReadableOutputTest(unittest.TestCase):
+    def test_formats_times_in_the_local_timezone(self):
+        self.assertEqual(teams_graph.local_time("2026-10-21T07:12:44.096Z", PARIS_SUMMER), "2026-10-21 09:12")
+        self.assertIsNone(teams_graph.local_time(None))
+
+    def test_renders_message_text_and_times(self):
+        conversation = {"title": "Projet", "messages": [
+            {"id": "1", "time": "2026-10-21T07:00:00.000Z", "html": "<p>a<br>b</p>"},
+            {"id": "2", "time": "2026-10-21T07:01:00.000Z", "text": "a <b>"},
+            {"id": "3", "time": None, "deleted": True},
+        ]}
+        self.assertEqual(teams_graph.readable_messages(conversation, PARIS_SUMMER), {"title": "Projet", "messages": [
+            {"id": "1", "time": "2026-10-21 09:00", "text": "a\nb"},
+            {"id": "2", "time": "2026-10-21 09:01", "text": "a <b>"},
+            {"id": "3", "time": None, "deleted": True},
+        ]})
+
+    def test_renders_last_activity_times(self):
+        conversations = [{"title": "A", "lastActivity": "2026-10-20T22:30:00.000Z"}, {"title": "B", "lastActivity": None}]
+        self.assertEqual(teams_graph.readable_conversations(conversations, PARIS_SUMMER), [
+            {"title": "A", "lastActivity": "2026-10-21 00:30"}, {"title": "B", "lastActivity": None},
+        ])
+
 
 class RunTest(unittest.TestCase):
     def test_evaluates_the_page_script_with_the_request(self):
         result = {"kind": "chat", "messageId": "1"}
         with FakeDevTools([page_target()], value_answer({"ok": True, "result": result})) as devtools:
-            request = {"action": "send", "conversationId": "19:a@thread.v2", "teamId": None, "html": "<b>é</b>"}
+            request = {"action": "send", "conversationId": "19:a@thread.v2", "replyTo": None, "html": "<b>é</b>"}
             self.assertEqual(teams_graph.run(request, devtools.url), result)
         script = teams_graph.PAGE_SCRIPT.read_text(encoding="utf-8").strip()
         self.assertEqual(devtools.expressions, [f"({script})({json.dumps(request)})"])
@@ -163,22 +207,22 @@ class MainTest(unittest.TestCase):
         code, stdout, _, run = self.run_main(["send", "19:a@thread.v2", "--approval", "abc"], "<b>é</b>", {"messageId": "1"})
         self.assertEqual(code, 0)
         run.assert_called_once_with({
-            "action": "send", "conversationId": "19:a@thread.v2", "teamId": None, "html": "<b>é</b>", "mentions": [],
+            "action": "send", "conversationId": "19:a@thread.v2", "replyTo": None, "html": "<b>é</b>", "mentions": [],
             "approval": "abc",
         })
         self.assertEqual(json.loads(stdout), {"messageId": "1"})
 
-    def test_sends_a_plain_text_file_to_a_channel_team(self):
+    def test_sends_a_plain_text_reply_to_a_channel_post(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "message.txt"
         path.write_text("x < y\n", encoding="utf-8")
         code, _, _, run = self.run_main(
-            ["send", "19:c@thread.tacv2", "--team", "t", "--file", str(path), "--text", "--approval", "abc"], answer={},
+            ["send", "19:c@thread.tacv2", "--reply-to", "123", "--file", str(path), "--text", "--approval", "abc"], answer={},
         )
         self.assertEqual(code, 0)
         run.assert_called_once_with({
-            "action": "send", "conversationId": "19:c@thread.tacv2", "teamId": "t", "html": "x &lt; y", "mentions": [],
+            "action": "send", "conversationId": "19:c@thread.tacv2", "replyTo": "123", "html": "x &lt; y", "mentions": [],
             "approval": "abc",
         })
 
@@ -194,7 +238,7 @@ class MainTest(unittest.TestCase):
             ["preview", "48:notes"], "<p>Hi <at>Eric</at></p>", {"html": '<p>Hi <at id="0">Eric</at></p>', "approval": "abc"},
         )
         self.assertEqual(code, 0)
-        run.assert_called_once_with({"action": "preview", "conversationId": "48:notes", "teamId": None, "html": "<p>Hi <at>Eric</at></p>", "mentions": []})
+        run.assert_called_once_with({"action": "preview", "conversationId": "48:notes", "replyTo": None, "html": "<p>Hi <at>Eric</at></p>", "mentions": []})
         self.assertEqual(json.loads(stdout), {"html": '<p>Hi <at id="0">Eric</at></p>', "approval": "abc", "preview": "Hi @Eric"})
 
     def test_requires_an_approval_code_to_send(self):
@@ -206,11 +250,43 @@ class MainTest(unittest.TestCase):
         self.assertIn("--approval", stderr.getvalue())
         run.assert_not_called()
 
-    def test_prints_the_displayed_conversation(self):
+    def test_prints_the_conversation_of_the_request(self):
         code, stdout, _, run = self.run_main(["current"], answer={"title": "Alice"})
         self.assertEqual(code, 0)
         run.assert_called_once_with({"action": "current"})
         self.assertEqual(json.loads(stdout), {"title": "Alice"})
+
+    def test_lists_conversations_with_a_query(self):
+        answer = [{"title": "Marie Boudet", "lastActivity": None}]
+        code, stdout, _, run = self.run_main(["chats", "--query", "marie b", "--limit", "5"], answer=answer)
+        self.assertEqual(code, 0)
+        run.assert_called_once_with({"action": "chats", "query": "marie b", "limit": 5})
+        self.assertEqual(json.loads(stdout), answer)
+
+    def test_lists_recent_conversations_by_default(self):
+        _, _, _, run = self.run_main(["chats"], answer=[])
+        run.assert_called_once_with({"action": "chats", "query": "", "limit": 20})
+
+    def test_reads_messages_as_text(self):
+        answer = {"title": "Projet", "messages": [{"id": "1", "time": None, "html": "<p>a &amp; b</p>"}]}
+        code, stdout, _, run = self.run_main(["read", "19:c@thread.tacv2", "--thread", "1", "--limit", "3"], answer=answer)
+        self.assertEqual(code, 0)
+        run.assert_called_once_with({"action": "read", "conversationId": "19:c@thread.tacv2", "threadId": "1", "limit": 3})
+        self.assertEqual(json.loads(stdout), {"title": "Projet", "messages": [{"id": "1", "time": None, "text": "a & b"}]})
+
+    def test_reads_the_default_number_of_messages(self):
+        _, _, _, run = self.run_main(["read", "48:notes"], answer={"messages": []})
+        run.assert_called_once_with({"action": "read", "conversationId": "48:notes", "threadId": None, "limit": 30})
+
+    def test_rejects_a_non_positive_limit(self):
+        for value in ("0", "-1", "x"):
+            stderr = io.StringIO()
+            with mock.patch.object(teams_graph, "run") as run, contextlib.redirect_stderr(stderr), \
+                    self.assertRaises(SystemExit) as raised:
+                teams_graph.main(["read", "48:notes", "--limit", value])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("--limit", stderr.getvalue())
+            run.assert_not_called()
 
     def test_fails_without_calling_teams_for_an_empty_message(self):
         code, stdout, stderr, run = self.run_main(["send", "19:a@thread.v2", "--approval", "abc"], "  ")

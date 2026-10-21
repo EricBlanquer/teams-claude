@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import urllib.request
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +24,14 @@ BLOCK_TAGS = {"p", "div", "blockquote", "pre", "codeblock", "table", "ul", "ol",
 PREFORMATTED_TAGS = {"pre", "codeblock"}
 LIST_TAGS = {"ul", "ol"}
 CELL_TAGS = {"td", "th"}
+MENTION_ITEMTYPE = "schema.skype.com/Mention"
+EMOJI_ITEMTYPE = "schema.skype.com/Emoji"
+IMAGE_PLACEHOLDER = "[image]"
+QUOTE_MARKER = "> "
+QUOTE_ONLY_LINE = re.compile(r"[> ]+")
+TIME_FORMAT = "%Y-%m-%d %H:%M"
+DEFAULT_CONVERSATION_LIMIT = 20
+DEFAULT_MESSAGE_LIMIT = 30
 
 
 class TeamsGraphError(Exception):
@@ -54,11 +63,16 @@ class TextRenderer(HTMLParser):
         self.lists = []
         self.preformatted = 0
         self.cells = 0
+        self.quotes = 0
+        self.mention = None
+
+    def newline(self, text=""):
+        self.parts.append("\n" + QUOTE_MARKER * self.quotes + text)
 
     def write(self, text):
         if not self.preformatted:
             text = re.sub(r"\s+", " ", text)
-            if not self.parts or self.parts[-1].endswith("\n"):
+            if not self.parts or self.parts[-1].endswith(("\n", QUOTE_MARKER)):
                 text = text.lstrip(" ")
         if text:
             self.parts.append(text)
@@ -67,8 +81,10 @@ class TextRenderer(HTMLParser):
         return tag in BLOCK_TAGS and not (tag in LIST_TAGS and self.lists)
 
     def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        itemtype = attributes.get("itemtype") or ""
         if self.starts_line(tag):
-            self.parts.append("\n")
+            self.newline()
         if tag in PREFORMATTED_TAGS:
             self.preformatted += 1
         if tag in LIST_TAGS:
@@ -78,11 +94,11 @@ class TextRenderer(HTMLParser):
                 self.lists.append(["ul", 0])
             self.lists[-1][1] += 1
             marker = "- " if self.lists[-1][0] == "ul" else f"{self.lists[-1][1]}. "
-            self.parts.append("\n" + "  " * (len(self.lists) - 1) + marker)
+            self.newline("  " * (len(self.lists) - 1) + marker)
         elif tag == "br":
-            self.parts.append("\n")
+            self.newline()
         elif tag == "tr":
-            self.parts.append("\n")
+            self.newline()
             self.cells = 0
         elif tag in CELL_TAGS:
             if self.cells:
@@ -90,15 +106,23 @@ class TextRenderer(HTMLParser):
                 self.parts.append(" | ")
             self.cells += 1
         elif tag == "blockquote":
-            self.parts.append("> ")
+            self.quotes += 1
+            self.parts.append(QUOTE_MARKER)
         elif tag == "at":
             self.parts.append("@")
+        elif tag == "span" and MENTION_ITEMTYPE in itemtype and attributes.get("itemid") != self.mention:
+            self.mention = attributes.get("itemid")
+            self.parts.append("@")
+        elif tag == "img":
+            self.write((attributes.get("alt") or "") if EMOJI_ITEMTYPE in itemtype else IMAGE_PLACEHOLDER)
 
     def handle_endtag(self, tag):
         if tag in LIST_TAGS and self.lists:
             self.lists.pop()
+        if tag == "blockquote":
+            self.quotes = max(self.quotes - 1, 0)
         if self.starts_line(tag):
-            self.parts.append("\n")
+            self.newline()
         if tag in PREFORMATTED_TAGS:
             self.preformatted = max(self.preformatted - 1, 0)
 
@@ -106,7 +130,7 @@ class TextRenderer(HTMLParser):
         self.write(data)
 
     def text(self):
-        lines = [line.rstrip() for line in "".join(self.parts).split("\n")]
+        lines = ["" if QUOTE_ONLY_LINE.fullmatch(line) else line.rstrip() for line in "".join(self.parts).split("\n")]
         return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip("\n")
 
 
@@ -115,6 +139,33 @@ def html_to_text(content):
     renderer.feed(content)
     renderer.close()
     return renderer.text()
+
+
+def local_time(value, timezone=None):
+    if not value:
+        return value
+    return datetime.fromisoformat(value).astimezone(timezone).strftime(TIME_FORMAT)
+
+
+def readable_messages(conversation, timezone=None):
+    for message in conversation["messages"]:
+        message["time"] = local_time(message.get("time"), timezone)
+        if "html" in message:
+            message["text"] = html_to_text(message.pop("html"))
+    return conversation
+
+
+def readable_conversations(conversations, timezone=None):
+    for conversation in conversations:
+        conversation["lastActivity"] = local_time(conversation.get("lastActivity"), timezone)
+    return conversations
+
+
+def positive_integer(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
 
 
 def page_expression(request):
@@ -166,8 +217,8 @@ def read_message(path):
 
 
 def add_message_arguments(command):
-    command.add_argument("conversation_id", help="chat id, or channel id (@thread.tacv2 / @thread.skype)")
-    command.add_argument("--team", help="team id of the channel, resolved from the joined teams when omitted")
+    command.add_argument("conversation_id", help="Teams thread id of the chat or channel")
+    command.add_argument("--reply-to", metavar="MESSAGE_ID", help="reply inside this channel post instead of creating a new post")
     command.add_argument("--file", type=Path, help="file containing the message")
     command.add_argument("--text", action="store_true", help="treat the message as plain text instead of HTML")
     command.add_argument(
@@ -177,9 +228,16 @@ def add_message_arguments(command):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Post Teams messages through Microsoft Graph with the signed-in Teams session")
+    parser = argparse.ArgumentParser(description="Read and post Teams messages by thread id with the signed-in Teams session")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("current", help="print the conversation displayed in Teams")
+    commands.add_parser("current", help="print the conversation displayed when the user submitted the request")
+    chats = commands.add_parser("chats", help="list recent conversations with their thread id, most recent first")
+    chats.add_argument("--query", default="", help="keep conversations whose title contains every word of QUERY")
+    chats.add_argument("--limit", type=positive_integer, default=DEFAULT_CONVERSATION_LIMIT)
+    read = commands.add_parser("read", help="print the latest messages of a conversation, oldest first")
+    read.add_argument("conversation_id", help="Teams thread id of the chat or channel")
+    read.add_argument("--thread", metavar="MESSAGE_ID", help="read the replies of this channel post")
+    read.add_argument("--limit", type=positive_integer, default=DEFAULT_MESSAGE_LIMIT)
     preview = commands.add_parser("preview", help="resolve and print a message and its approval code without posting it")
     send = commands.add_parser("send", help="post a message the user approved after its preview")
     for command in (preview, send):
@@ -189,11 +247,15 @@ def main(argv=None):
     try:
         if args.command == "current":
             request = {"action": "current"}
+        elif args.command == "chats":
+            request = {"action": "chats", "query": args.query, "limit": args.limit}
+        elif args.command == "read":
+            request = {"action": "read", "conversationId": args.conversation_id, "threadId": args.thread, "limit": args.limit}
         else:
             request = {
                 "action": args.command,
                 "conversationId": args.conversation_id,
-                "teamId": args.team,
+                "replyTo": args.reply_to,
                 "html": message_html(read_message(args.file), args.text),
                 "mentions": args.mention,
             }
@@ -202,6 +264,10 @@ def main(argv=None):
         result = run(request)
         if args.command == "preview":
             result["preview"] = html_to_text(result["html"])
+        elif args.command == "chats":
+            result = readable_conversations(result)
+        elif args.command == "read":
+            result = readable_messages(result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (TeamsGraphError, OSError) as ex:
         print(f"teams_graph: {ex}", file=sys.stderr)
