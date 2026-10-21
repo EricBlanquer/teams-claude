@@ -25,6 +25,22 @@ BLOCK_TAGS = {"p", "div", "blockquote", "pre", "codeblock", "table", "ul", "ol",
 PREFORMATTED_TAGS = {"pre", "codeblock"}
 LIST_TAGS = {"ul", "ol"}
 CELL_TAGS = {"td", "th"}
+ALLOWED_TAGS = {
+    "p", "br", "div", "span", "b", "strong", "i", "em", "u", "s", "strike", "del", "sub", "sup", "code", "pre", "a",
+    "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td", "blockquote", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+}
+COMMON_ATTRIBUTES = {"style"}
+TAG_ATTRIBUTES = {
+    "a": {"href"},
+    "table": {"border", "cellpadding", "cellspacing"},
+    "td": {"colspan", "rowspan"},
+    "th": {"colspan", "rowspan"},
+}
+STYLE_PROPERTIES = {
+    "color", "background-color", "font-weight", "font-style", "text-decoration", "text-align", "border", "border-collapse", "padding",
+}
+LINK_SCHEMES = ("https:", "http:", "mailto:")
+UNSAFE_STYLE_VALUE = re.compile(r"url\s*\(|expression\s*\(|[<>\\]", re.IGNORECASE)
 MENTION_ITEMTYPE = "schema.skype.com/Mention"
 EMOJI_ITEMTYPE = "schema.skype.com/Emoji"
 IMAGE_PLACEHOLDER = "[image]"
@@ -50,11 +66,57 @@ def teams_page(targets):
     return pages[0]["webSocketDebuggerUrl"]
 
 
+class MessageValidator(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.problems = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in ALLOWED_TAGS:
+            self.problems.append(f"<{tag}>")
+            return
+        allowed = COMMON_ATTRIBUTES | TAG_ATTRIBUTES.get(tag, set())
+        for name, value in attrs:
+            if name not in allowed:
+                self.problems.append(f"{name} attribute on <{tag}>")
+            elif name == "style":
+                self.check_style(tag, value or "")
+            elif name == "href" and not (value or "").strip().lower().startswith(LINK_SCHEMES):
+                self.problems.append(f"link to {value!r}")
+
+    def check_style(self, tag, style):
+        for declaration in filter(str.strip, style.split(";")):
+            name, _, value = declaration.partition(":")
+            if name.strip().lower() not in STYLE_PROPERTIES:
+                self.problems.append(f"style {name.strip()!r} on <{tag}>")
+            elif UNSAFE_STYLE_VALUE.search(value):
+                self.problems.append(f"style value {value.strip()!r} on <{tag}>")
+
+    def handle_comment(self, data):
+        self.problems.append("HTML comment")
+
+    def handle_decl(self, decl):
+        self.problems.append(f"<!{decl}>")
+
+    def handle_pi(self, data):
+        self.problems.append(f"<?{data}>")
+
+
+def html_problems(content):
+    validator = MessageValidator()
+    validator.feed(content)
+    validator.close()
+    return list(dict.fromkeys(validator.problems))
+
+
 def message_html(content, plain_text):
     if plain_text:
         content = html.escape(content.replace("\r\n", "\n").rstrip("\n"), quote=False).replace("\n", "<br>")
     if not content.strip():
         raise TeamsGraphError("The message is empty")
+    problems = html_problems(content)
+    if problems:
+        raise TeamsGraphError("Unsupported HTML, the preview could differ from what Teams shows: " + ", ".join(problems))
     return content
 
 

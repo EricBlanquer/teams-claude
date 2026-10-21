@@ -57,6 +57,7 @@
     var BUTTON_STYLES = 'padding:6px 16px;border-radius:4px;font:inherit;font-weight:600;cursor:pointer;';
     var CANCEL_BUTTON_STYLES = BUTTON_STYLES + 'border:1px solid #8a8886;background:#ffffff;color:#242424;';
     var SEND_BUTTON_STYLES = BUTTON_STYLES + 'border:1px solid #5b5fc7;background:#5b5fc7;color:#ffffff;';
+    var PREVIEW_POLICY = "default-src 'none'; style-src 'unsafe-inline'";
     var PREVIEW_STYLES = 'body{margin:12px;background:#ffffff;color:#242424;font:14px/1.45 "Segoe UI",system-ui,sans-serif;' +
         'overflow-wrap:anywhere}table{border-collapse:collapse}td,th{border:1px solid #c8c6c4;padding:4px 8px}' +
         'pre,code,codeblock{font-family:Consolas,"Courier New",monospace}' +
@@ -556,7 +557,8 @@
     }
 
     function previewDocument(html) {
-        return '<!doctype html><html><head><meta charset="utf-8"><style>' + PREVIEW_STYLES + '</style></head><body>' + html + '</body></html>';
+        return '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + PREVIEW_POLICY + '">' +
+            '<style>' + PREVIEW_STYLES + '</style></head><body>' + html + '</body></html>';
     }
 
     function destinationText(prepared) {

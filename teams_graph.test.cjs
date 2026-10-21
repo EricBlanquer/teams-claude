@@ -694,7 +694,7 @@ test('asks the user in Teams before posting and restores the focus', async () =>
         assert.equal(frame.getAttribute('tabindex'), '-1');
         assert.equal(frame.src, 'blob:preview-1');
         assert.equal(current.blobs[0].type, 'text/html');
-        assert.match(current.blobs[0].content, /^<!doctype html>.*<style>.*<\/style><\/head><body><p>Bonjour<\/p><\/body><\/html>$/);
+        assert.match(current.blobs[0].content, /^<!doctype html>.*<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>.*<\/style><\/head><body><p>Bonjour<\/p><\/body><\/html>$/);
         assert.equal(current.document.activeElement, current.button('Annuler'));
         assert.equal(current.timers[0].delay, 300_000);
         assert.equal(posts(current).length, 0);

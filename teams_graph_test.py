@@ -99,6 +99,34 @@ class MessageHtmlTest(unittest.TestCase):
             'a &lt;id&gt; &amp; "b"<br>second',
         )
 
+    def test_accepts_the_html_subset_teams_renders(self):
+        content = (
+            '<h2>Titre</h2><p>a<br><b>b</b> <i>c</i> <s>d</s> <code>e</code> <a href="https://x.example/?a=1&amp;b=2">f</a> '
+            '<a href="mailto:a@b.c">m</a> <span style="color:#e81123; font-weight:700;">g</span> '
+            '<span style="background-color:rgb(229,241,143);color:rgb(30,83,163)">h</span></p>'
+            '<table border="1" cellpadding="4"><tr><th colspan="2" style="text-align:left;padding:2px">A</th></tr></table>'
+            '<ul><li>i</li></ul><ol><li>j</li></ol><pre>k</pre><blockquote>l</blockquote><hr>'
+        )
+        self.assertEqual(teams_graph.message_html(content, False), content)
+
+    def test_rejects_html_that_could_preview_differently(self):
+        content = (
+            '<style>.x{display:none}</style><span class="x" style="display:none;color:red">a</span><img src="x">'
+            '<a href="javascript:alert(1)">b</a><!-- c --><p hidden>d</p><span style="color:url(https://e.example)">e</span>'
+            '<at id="0">Eric</at>'
+        )
+        with self.assertRaises(teams_graph.TeamsGraphError) as raised:
+            teams_graph.message_html(content, False)
+        self.assertEqual(str(raised.exception), "Unsupported HTML, the preview could differ from what Teams shows: " + ", ".join([
+            "<style>", "class attribute on <span>", "style 'display' on <span>", "<img>", "link to 'javascript:alert(1)'",
+            "HTML comment", "hidden attribute on <p>", "style value 'url(https://e.example)' on <span>", "<at>",
+        ]))
+
+    def test_rejects_documents_and_processing_instructions(self):
+        for content in ("<!DOCTYPE html><p>a</p>", "<?xml version='1.0'?><p>a</p>"):
+            with self.assertRaisesRegex(teams_graph.TeamsGraphError, "^Unsupported HTML"):
+                teams_graph.message_html(content, False)
+
     def test_rejects_empty_messages(self):
         for content, plain_text in (("", False), (" \n", False), ("\n\n", True)):
             with self.assertRaisesRegex(teams_graph.TeamsGraphError, "empty"):
@@ -241,10 +269,10 @@ class MainTest(unittest.TestCase):
 
     def test_previews_with_a_readable_text_rendering(self):
         code, stdout, _, run = self.run_main(
-            ["preview", "48:notes"], "<p>Hi <at>Eric</at></p>", {"html": '<p>Hi <at id="0">Eric</at></p>', "approval": "abc"},
+            ["preview", "48:notes", "--mention", "Eric"], "<p>Hi @Eric</p>", {"html": '<p>Hi <at id="0">Eric</at></p>', "approval": "abc"},
         )
         self.assertEqual(code, 0)
-        run.assert_called_once_with({"action": "preview", "conversationId": "48:notes", "replyTo": None, "html": "<p>Hi <at>Eric</at></p>", "mentions": []})
+        run.assert_called_once_with({"action": "preview", "conversationId": "48:notes", "replyTo": None, "html": "<p>Hi @Eric</p>", "mentions": ["Eric"]})
         self.assertEqual(json.loads(stdout), {"html": '<p>Hi <at id="0">Eric</at></p>', "approval": "abc", "preview": "Hi @Eric"})
 
     def test_requires_an_approval_code_to_send(self):
