@@ -152,7 +152,7 @@ class ReadableOutputTest(unittest.TestCase):
             {"id": "2", "time": "2026-10-21T07:01:00.000Z", "text": "a <b>"},
             {"id": "3", "time": None, "deleted": True},
         ]}
-        self.assertEqual(teams_graph.readable_messages(conversation, PARIS_SUMMER), {"title": "Projet", "messages": [
+        self.assertEqual(teams_graph.readable_messages(conversation, PARIS_SUMMER), {"notice": teams_graph.UNTRUSTED_NOTICE, "title": "Projet", "messages": [
             {"id": "1", "time": "2026-10-21 09:00", "text": "a\nb"},
             {"id": "2", "time": "2026-10-21 09:01", "text": "a <b>"},
             {"id": "3", "time": None, "deleted": True},
@@ -272,7 +272,9 @@ class MainTest(unittest.TestCase):
         code, stdout, _, run = self.run_main(["read", "19:c@thread.tacv2", "--thread", "1", "--limit", "3"], answer=answer)
         self.assertEqual(code, 0)
         run.assert_called_once_with({"action": "read", "conversationId": "19:c@thread.tacv2", "threadId": "1", "limit": 3})
-        self.assertEqual(json.loads(stdout), {"title": "Projet", "messages": [{"id": "1", "time": None, "text": "a & b"}]})
+        self.assertEqual(json.loads(stdout), {
+            "notice": teams_graph.UNTRUSTED_NOTICE, "title": "Projet", "messages": [{"id": "1", "time": None, "text": "a & b"}],
+        })
 
     def test_reads_the_default_number_of_messages(self):
         _, _, _, run = self.run_main(["read", "48:notes"], answer={"messages": []})
