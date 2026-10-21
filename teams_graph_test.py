@@ -174,6 +174,12 @@ class RunTest(unittest.TestCase):
         script = teams_graph.PAGE_SCRIPT.read_text(encoding="utf-8").strip()
         self.assertEqual(devtools.expressions, [f"({script})({json.dumps(request)})"])
 
+    def test_waits_for_the_confirmation_dialog_on_top_of_the_usual_timeout(self):
+        self.assertEqual(teams_graph.request_timeout({"action": "current"}), teams_graph.TIMEOUT_SECONDS)
+        self.assertEqual(
+            teams_graph.request_timeout({"action": "send", "confirmationTimeoutSeconds": 300}), teams_graph.TIMEOUT_SECONDS + 300,
+        )
+
     def test_reports_page_errors(self):
         with FakeDevTools([page_target()], value_answer({"ok": False, "error": "Graph failed"})) as devtools:
             with self.assertRaisesRegex(teams_graph.TeamsGraphError, "^Graph failed$"):
@@ -208,7 +214,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         run.assert_called_once_with({
             "action": "send", "conversationId": "19:a@thread.v2", "replyTo": None, "html": "<b>é</b>", "mentions": [],
-            "approval": "abc",
+            "approval": "abc", "confirmationTimeoutSeconds": teams_graph.CONFIRMATION_TIMEOUT_SECONDS,
         })
         self.assertEqual(json.loads(stdout), {"messageId": "1"})
 
@@ -223,7 +229,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         run.assert_called_once_with({
             "action": "send", "conversationId": "19:c@thread.tacv2", "replyTo": "123", "html": "x &lt; y", "mentions": [],
-            "approval": "abc",
+            "approval": "abc", "confirmationTimeoutSeconds": teams_graph.CONFIRMATION_TIMEOUT_SECONDS,
         })
 
     def test_passes_every_mention(self):

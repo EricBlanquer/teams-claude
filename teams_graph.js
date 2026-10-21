@@ -37,6 +37,31 @@
     var MISSING_USER_STATUSES = [403, 404];
     var NAME_BOUNDARY = '(?![\\p{L}\\p{N}])';
     var APPROVAL_CODE_BYTES = 6;
+    var CONFIRMATION_DIALOG_ID = 'teams-assistant-send-confirmation';
+    var CONFIRMATION_TITLE_ID = CONFIRMATION_DIALOG_ID + '-title';
+    var CONFIRMATION_DESTINATION_ID = CONFIRMATION_DIALOG_ID + '-destination';
+    var DEFAULT_CONFIRMATION_TIMEOUT_SECONDS = 300;
+    var CONFIRMED = 'confirmed';
+    var CANCELLED = 'cancelled';
+    var EXPIRED = 'expired';
+    var OVERLAY_STYLES = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(0,0,0,0.45);';
+    var DIALOG_STYLES = 'display:flex;flex-direction:column;gap:12px;box-sizing:border-box;width:min(640px,calc(100vw - 32px));' +
+        'max-height:calc(100vh - 32px);padding:20px;border-radius:8px;background:#ffffff;color:#242424;' +
+        'box-shadow:0 8px 32px rgba(0,0,0,0.35);font:14px/1.45 "Segoe UI",system-ui,sans-serif;';
+    var HEADING_STYLES = 'margin:0;font-size:18px;font-weight:600;color:#242424;';
+    var TEXT_STYLES = 'margin:0;color:#242424;overflow-wrap:anywhere;';
+    var HINT_STYLES = 'margin:0;color:#616161;font-size:12px;';
+    var FRAME_STYLES = 'width:100%;height:min(320px,45vh);border:1px solid #d1d1d1;border-radius:4px;background:#ffffff;';
+    var BUTTON_ROW_STYLES = 'display:flex;justify-content:flex-end;gap:8px;';
+    var BUTTON_STYLES = 'padding:6px 16px;border-radius:4px;font:inherit;font-weight:600;cursor:pointer;';
+    var CANCEL_BUTTON_STYLES = BUTTON_STYLES + 'border:1px solid #8a8886;background:#ffffff;color:#242424;';
+    var SEND_BUTTON_STYLES = BUTTON_STYLES + 'border:1px solid #5b5fc7;background:#5b5fc7;color:#ffffff;';
+    var PREVIEW_STYLES = 'body{margin:12px;background:#ffffff;color:#242424;font:14px/1.45 "Segoe UI",system-ui,sans-serif;' +
+        'overflow-wrap:anywhere}table{border-collapse:collapse}td,th{border:1px solid #c8c6c4;padding:4px 8px}' +
+        'pre,code,codeblock{font-family:Consolas,"Courier New",monospace}' +
+        'pre,codeblock{display:block;white-space:pre-wrap;background:#f5f5f5;padding:8px}' +
+        'blockquote{margin:0;padding-left:12px;border-left:3px solid #c8c6c4}at{font-weight:600;color:#4f52b2}';
 
     function storageEntries() {
         var entries = [];
@@ -523,6 +548,90 @@
         }).join('');
     }
 
+    function pageElement(tag, styles, text) {
+        var node = document.createElement(tag);
+        node.style.cssText = styles;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    }
+
+    function previewDocument(html) {
+        return '<!doctype html><html><head><meta charset="utf-8"><style>' + PREVIEW_STYLES + '</style></head><body>' + html + '</body></html>';
+    }
+
+    function destinationText(prepared) {
+        var destination = prepared.target.title || prepared.target.conversationId;
+        return 'Destination\u00A0: ' + destination + (prepared.replyTo ? ', réponse dans un fil' : '');
+    }
+
+    function mentionText(people) {
+        return 'Mentions\u00A0: ' + Array.from(people.values(), function(person) {
+            return person.firstName + ' (' + person.displayName + ')';
+        }).join(', ');
+    }
+
+    function askConfirmation(prepared, timeoutSeconds) {
+        if (document.getElementById(CONFIRMATION_DIALOG_ID)) throw new Error('Another Teams message is waiting for confirmation');
+        return new Promise(function(resolve) {
+            var previousFocus = document.activeElement;
+            var overlay = pageElement('div', OVERLAY_STYLES);
+            overlay.id = CONFIRMATION_DIALOG_ID;
+            var dialog = pageElement('div', DIALOG_STYLES);
+            dialog.setAttribute('role', 'dialog');
+            dialog.setAttribute('aria-modal', 'true');
+            dialog.setAttribute('aria-labelledby', CONFIRMATION_TITLE_ID);
+            dialog.setAttribute('aria-describedby', CONFIRMATION_DESTINATION_ID);
+            var heading = pageElement('h2', HEADING_STYLES, 'Envoyer ce message\u00A0?');
+            heading.id = CONFIRMATION_TITLE_ID;
+            var destination = pageElement('p', TEXT_STYLES, destinationText(prepared));
+            destination.id = CONFIRMATION_DESTINATION_ID;
+            var preview = pageElement('iframe', FRAME_STYLES);
+            preview.setAttribute('sandbox', '');
+            preview.setAttribute('tabindex', '-1');
+            preview.title = 'Aperçu du message';
+            var previewUrl = URL.createObjectURL(new Blob([previewDocument(prepared.payload.body.content)], {type: 'text/html'}));
+            preview.src = previewUrl;
+            var hint = pageElement('p', HINT_STYLES, 'Sans réponse, l\u2019envoi est annulé dans ' + Math.ceil(timeoutSeconds / 60) + '\u00A0min.');
+            var cancel = pageElement('button', CANCEL_BUTTON_STYLES, 'Annuler');
+            cancel.type = 'button';
+            var send = pageElement('button', SEND_BUTTON_STYLES, 'Envoyer');
+            send.type = 'button';
+            var buttons = pageElement('div', BUTTON_ROW_STYLES);
+            buttons.append(cancel, send);
+            dialog.append(heading, destination);
+            if (prepared.people.size) dialog.append(pageElement('p', TEXT_STYLES, mentionText(prepared.people)));
+            dialog.append(preview, hint, buttons);
+            overlay.append(dialog);
+            var finished = false;
+            var timer = setTimeout(function() { finish(EXPIRED); }, timeoutSeconds * 1000);
+            function finish(decision) {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                overlay.remove();
+                URL.revokeObjectURL(previewUrl);
+                if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === 'function') previousFocus.focus();
+                resolve(decision);
+            }
+            cancel.addEventListener('click', function() { finish(CANCELLED); });
+            send.addEventListener('click', function(event) {
+                if (event.isTrusted) finish(CONFIRMED);
+            });
+            overlay.addEventListener('keydown', function(event) {
+                event.stopPropagation();
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    finish(CANCELLED);
+                } else if (event.key === 'Tab') {
+                    event.preventDefault();
+                    (document.activeElement === send ? cancel : send).focus();
+                }
+            });
+            document.body.append(overlay);
+            cancel.focus();
+        });
+    }
+
     async function previewMessage(request) {
         var prepared = await preparedMessage(request);
         return Object.assign(publicTarget(prepared.target), {
@@ -541,6 +650,10 @@
         if (request.approval !== await approvalCode(prepared)) {
             throw new Error('The message, conversation or mentions differ from the approved preview');
         }
+        var timeoutSeconds = Number(request.confirmationTimeoutSeconds) || DEFAULT_CONFIRMATION_TIMEOUT_SECONDS;
+        var decision = await askConfirmation(prepared, timeoutSeconds);
+        if (decision === CANCELLED) throw new Error('The user cancelled the message in the Teams confirmation dialog');
+        if (decision === EXPIRED) throw new Error('The Teams confirmation dialog expired after ' + timeoutSeconds + ' s without an answer');
         var path = prepared.target.path + '/messages' + (prepared.replyTo ? '/' + encodeURIComponent(prepared.replyTo) + '/replies' : '');
         var message = await graphRequest(prepared.token, 'POST', path, prepared.payload);
         return Object.assign(publicTarget(prepared.target), {

@@ -17,6 +17,63 @@ const TOKEN_URL = 'POST https://login.microsoftonline.com/tenant-id/oauth2/v2.0/
 const CHAT_MESSAGES = `POST ${GRAPH}/chats/${encodeURIComponent(CHAT_ID)}/messages`;
 const CHAT_MEMBERS = `GET ${GRAPH}/chats/${encodeURIComponent(CHAT_ID)}/members`;
 const CHANNEL_PATH = `${GRAPH}/teams/team-x/channels/${encodeURIComponent(CHANNEL_ID)}`;
+const DIALOG_ID = 'teams-assistant-send-confirmation';
+
+class FakeElement {
+    constructor(owner, tag) {
+        this.owner = owner;
+        this.tagName = tag.toUpperCase();
+        this.style = {};
+        this.attributes = {};
+        this.children = [];
+        this.listeners = {};
+        this.parent = null;
+        this.textContent = '';
+    }
+
+    setAttribute(name, value) {
+        this.attributes[name] = String(value);
+    }
+
+    getAttribute(name) {
+        return this.attributes[name] ?? null;
+    }
+
+    append(...nodes) {
+        nodes.forEach(node => {
+            node.parent = this;
+            this.children.push(node);
+        });
+    }
+
+    remove() {
+        if (!this.parent) return;
+        this.parent.children = this.parent.children.filter(child => child !== this);
+        this.parent = null;
+    }
+
+    get isConnected() {
+        let node = this;
+        while (node.parent) node = node.parent;
+        return node === this.owner.body;
+    }
+
+    addEventListener(type, listener) {
+        (this.listeners[type] ||= []).push(listener);
+    }
+
+    dispatch(type, event = {}) {
+        (this.listeners[type] || []).forEach(listener => listener({preventDefault() {}, stopPropagation() {}, ...event}));
+    }
+
+    focus() {
+        this.owner.activeElement = this;
+    }
+
+    descendants() {
+        return this.children.flatMap(child => [child, ...child.descendants()]);
+    }
+}
 
 function accessToken(secret, expiresOn, target = SEND_SCOPES, homeAccountId = ACCOUNT) {
     return {credentialType: 'AccessToken', homeAccountId, target, secret, expiresOn: String(expiresOn)};
@@ -68,6 +125,9 @@ function environment({
     const writes = [];
     const listeners = [];
     const removed = [];
+    const timers = [];
+    const blobs = [];
+    const revoked = [];
     const graphObjects = {[ME_URL]: found({id: 'me', displayName: 'Eric Blanquer'}), ...graph};
     const allRoutes = {
         [`POST ${GRAPH}/$batch`]: (url, init) => jsonResponse(200, {
@@ -92,8 +152,24 @@ function environment({
         },
         document: {
             title: documentTitle,
+            activeElement: null,
             querySelectorAll: selector => (selector === '[data-track-thread-id]' ? elements : []),
             querySelector: selector => (selector === '[data-tid="chat-title"]' ? title : null),
+            createElement: tag => new FakeElement(context.document, tag),
+            getElementById: id => context.document.body.descendants().find(node => node.id === id) || null,
+        },
+        setTimeout: (callback, delay) => timers.push({callback, delay}),
+        clearTimeout: id => {
+            timers[id - 1] = null;
+        },
+        Blob: class {
+            constructor(parts, options) {
+                blobs.push({content: parts.join(''), type: options.type});
+            }
+        },
+        URL: {
+            createObjectURL: () => `blob:preview-${blobs.length}`,
+            revokeObjectURL: url => revoked.push(url),
         },
         fetch: async (url, init = {}) => {
             requests.push({url, method: init.method || 'GET', headers: init.headers, body: init.body});
@@ -108,10 +184,15 @@ function environment({
             return NOW_SECONDS * 1000;
         }
     };
+    context.document.body = new FakeElement(context.document, 'body');
     vm.createContext(context);
     const teamsGraph = vm.runInContext(source, context);
+    const dialog = () => context.document.getElementById(DIALOG_ID);
     return {
-        teamsGraph, requests, writes, window, listeners, removed,
+        teamsGraph, requests, writes, window, listeners, removed, timers, blobs, revoked, document: context.document, dialog,
+        button: label => dialog().descendants().find(node => node.tagName === 'BUTTON' && node.textContent === label),
+        texts: () => dialog().descendants().filter(node => node.tagName === 'P').map(node => node.textContent),
+        expire: () => timers.filter(Boolean).forEach(timer => timer.callback()),
         press: event => listeners.forEach(entry => entry.listener({key: 'Enter', ...event})),
         setDisplayed: (newElements, newTitle) => {
             elements = newElements;
@@ -124,10 +205,29 @@ function plain(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
-async function approvedSend(env, request) {
+function confirmInTeams(env) {
+    env.button('Envoyer').dispatch('click', {isTrusted: true});
+}
+
+async function whenDialogShown(env, sending, decide) {
+    let settled = false;
+    sending.then(() => {
+        settled = true;
+    });
+    for (let tick = 0; tick < 200 && !settled && !env.dialog(); tick++) await new Promise(resolve => setImmediate(resolve));
+    if (!settled && env.dialog()) await decide(env);
+    return sending;
+}
+
+async function startSend(env, request) {
     const preview = await env.teamsGraph({...request, action: 'preview'});
-    if (!preview.ok) return preview;
-    return env.teamsGraph({...request, action: 'send', approval: preview.result.approval});
+    if (!preview.ok) return {preview};
+    return {preview, sending: env.teamsGraph({...request, action: 'send', approval: preview.result.approval})};
+}
+
+async function approvedSend(env, request, decide = confirmInTeams) {
+    const {preview, sending} = await startSend(env, request);
+    return sending ? whenDialogShown(env, sending, decide) : preview;
 }
 
 function threadElement(id, type) {
@@ -575,6 +675,92 @@ test('resolves each distinct mention name once', async () => {
     assert.equal(outcome.ok, true, outcome.error);
     assert.equal(env.requests.filter(request => request.url.endsWith('/users/u-marc?$select=givenName')).length, 1);
     assert.deepEqual(Array.from(outcome.result.mentions, mention => mention.mention), ['Marc', 'Marie Boudet']);
+});
+
+test('asks the user in Teams before posting and restores the focus', async () => {
+    const env = environment({routes: {[CHAT_MESSAGES]: jsonResponse(201, {id: '42'})}});
+    const compose = env.document.createElement('textarea');
+    env.document.body.append(compose);
+    compose.focus();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '<p>Bonjour</p>'}, current => {
+        const dialog = current.dialog().children[0];
+        assert.equal(dialog.getAttribute('role'), 'dialog');
+        assert.equal(dialog.getAttribute('aria-modal'), 'true');
+        assert.equal(current.document.getElementById(dialog.getAttribute('aria-labelledby')).textContent, 'Envoyer ce message\u00A0?');
+        assert.equal(current.document.getElementById(dialog.getAttribute('aria-describedby')).textContent, 'Destination\u00A0: Projet');
+        assert.deepEqual(current.texts(), ['Destination\u00A0: Projet', 'Sans réponse, l\u2019envoi est annulé dans 5\u00A0min.']);
+        const frame = current.dialog().descendants().find(node => node.tagName === 'IFRAME');
+        assert.equal(frame.getAttribute('sandbox'), '');
+        assert.equal(frame.getAttribute('tabindex'), '-1');
+        assert.equal(frame.src, 'blob:preview-1');
+        assert.equal(current.blobs[0].type, 'text/html');
+        assert.match(current.blobs[0].content, /^<!doctype html>.*<style>.*<\/style><\/head><body><p>Bonjour<\/p><\/body><\/html>$/);
+        assert.equal(current.document.activeElement, current.button('Annuler'));
+        assert.equal(current.timers[0].delay, 300_000);
+        assert.equal(posts(current).length, 0);
+        confirmInTeams(current);
+    });
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(posts(env).length, 1);
+    assert.equal(env.dialog(), null);
+    assert.equal(env.document.activeElement, compose);
+    assert.deepEqual(env.revoked, ['blob:preview-1']);
+});
+
+test('ignores scripted clicks and cancels on Escape', async () => {
+    const env = environment();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'}, current => {
+        current.button('Envoyer').dispatch('click', {isTrusted: false});
+        assert.notEqual(current.dialog(), null);
+        current.dialog().dispatch('keydown', {key: 'Escape'});
+    });
+    assert.deepEqual({...outcome}, {ok: false, error: 'The user cancelled the message in the Teams confirmation dialog'});
+    assert.equal(posts(env).length, 0);
+    assert.equal(env.dialog(), null);
+});
+
+test('cancels with the Annuler button and keeps the focus inside the dialog', async () => {
+    const env = environment();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'}, current => {
+        current.dialog().dispatch('keydown', {key: 'Tab'});
+        assert.equal(current.document.activeElement, current.button('Envoyer'));
+        current.dialog().dispatch('keydown', {key: 'Tab', shiftKey: true});
+        assert.equal(current.document.activeElement, current.button('Annuler'));
+        current.button('Annuler').dispatch('click', {isTrusted: false});
+    });
+    assert.equal(outcome.error, 'The user cancelled the message in the Teams confirmation dialog');
+    assert.equal(posts(env).length, 0);
+});
+
+test('expires when the user does not answer', async () => {
+    const env = environment();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi', confirmationTimeoutSeconds: 90}, current => {
+        assert.equal(current.timers[0].delay, 90_000);
+        assert.equal(current.texts()[1], 'Sans réponse, l\u2019envoi est annulé dans 2\u00A0min.');
+        const send = current.button('Envoyer');
+        current.expire();
+        send.dispatch('click', {isTrusted: true});
+    });
+    assert.equal(outcome.error, 'The Teams confirmation dialog expired after 90 s without an answer');
+    assert.equal(posts(env).length, 0);
+    assert.equal(env.dialog(), null);
+});
+
+test('shows the reply target and mentions, and refuses a second pending message', async () => {
+    const env = environment({
+        routes: {
+            [`GET ${CHANNEL_PATH}/members`]: jsonResponse(200, {value: [member('u-1', 'Marie Boudet')]}),
+            [`GET ${GRAPH}/users/u-1`]: jsonResponse(200, {givenName: 'Marie'}),
+        },
+    });
+    const outcome = await approvedSend(env, {conversationId: CHANNEL_ID, replyTo: '7', html: '@Marie', mentions: ['Marie']}, async current => {
+        assert.deepEqual(current.texts().slice(0, 2), ['Destination\u00A0: General, réponse dans un fil', 'Mentions\u00A0: Marie (Marie Boudet)']);
+        const second = await startSend(current, {conversationId: CHAT_ID, html: 'other'});
+        assert.equal((await second.sending).error, 'Another Teams message is waiting for confirmation');
+        current.button('Annuler').dispatch('click');
+    });
+    assert.equal(outcome.error, 'The user cancelled the message in the Teams confirmation dialog');
+    assert.equal(posts(env).length, 0);
 });
 
 function membersUrl(chatId) {

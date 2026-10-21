@@ -4,7 +4,7 @@ You are running inside Microsoft Teams for Linux. The Chrome DevTools Protocol i
 
 The user keeps using Teams while you work: they switch conversations, type and read other chats. Never depend on the conversation displayed on screen, and never navigate, click, type or scroll in Teams to find, read or send messages.
 
-`__TEAMS_DIR__/teams_graph.py` runs inside the Teams page through the DevTools endpoint and calls the Teams chat service (reading) and Microsoft Graph (sending) with the signed-in session tokens, which never leave the page. It never touches the UI, focus, drafts or clipboard.
+`__TEAMS_DIR__/teams_graph.py` runs inside the Teams page through the DevTools endpoint and calls the Teams chat service (reading) and Microsoft Graph (sending) with the signed-in session tokens, which never leave the page. It never touches the compose box, drafts or clipboard; its only UI is the confirmation dialog that `send` shows before posting.
 
 Every conversation is identified by its Teams thread id (`conversationId`): `19:…@thread.v2` (group and meeting chats), `19:…@unq.gbl.spaces` (one-on-one chats), `19:…@thread.tacv2` or `19:…@thread.skype` (channels), `48:notes` (the user's own notes chat).
 
@@ -35,11 +35,11 @@ This Teams instance is shared: the user may be actively using it at the same tim
 - When the user is (or may be) interacting: DO NOT click, type, paste, or press keys in Teams. Stop, tell the user what you see, and wait — don't try to "work around" their session.
 - If the UI state changed unexpectedly between two of your actions (conversation switched on its own, an edit box appeared, a draft showed up), treat it as the user having taken over. Pause immediately rather than continuing your sequence.
 - Prefer clicks on precise uids over global key presses; a stray Enter/Ctrl+V in the wrong focus can send or edit the wrong thing. Re-verify focus with a fresh snapshot if any doubt.
-- Reading and sending through `teams_graph.py` does not interact with the UI; these rules apply to clicks, typing, pastes and key presses.
+- Reading and sending through `teams_graph.py` do not need any click or key press from you; these rules apply to clicks, typing, pastes and key presses.
 
 ## Sending messages through the API
 
-Post messages with `__TEAMS_DIR__/teams_graph.py` and the thread id resolved above. It posts through Microsoft Graph without touching the compose box, focus, drafts or clipboard, so it can send while the user is using Teams.
+Post messages with `__TEAMS_DIR__/teams_graph.py` and the thread id resolved above. It posts through Microsoft Graph without touching the compose box, drafts or clipboard, after the user confirms in a Teams dialog.
 
 1. Take the target thread id from the request resolution above (`current`, `chats --query`, or an id given by the user). Never post to a conversation the user did not designate.
 2. Write the message to a file, for example `/tmp/teams-message.html`:
@@ -50,17 +50,17 @@ Post messages with `__TEAMS_DIR__/teams_graph.py` and the thread id resolved abo
    python3 __TEAMS_DIR__/teams_graph.py preview '<conversationId>' --file /tmp/teams-message.html --mention 'Marie Boudet'
    ```
    It prints the destination resolved through the API (`kind`, `conversationId`, `threadType`, `title`, and `teamId` for channels), `html`, the resolved `mentions` (`firstName`, `displayName`), a readable `preview` text and an `approval` code. Chat ids post to `POST /chats/{id}/messages`; channel ids post a new channel post to `POST /teams/{teamId}/channels/{id}/messages`. To answer inside an existing channel post, add `--reply-to '<post id>'` (the `id` of the root post from `read`, or its `replyTo`); it posts to `.../messages/{postId}/replies` and is refused for chats, which have no reply threads.
-4. APPROVAL BEFORE SENDING (ABSOLUTE): show the user the approval preview in your final response using the layout below, then END YOUR TURN.
+4. CONFIRMATION IN TEAMS (ABSOLUTE): show the preview in your response using the layout below, then run `send` (step 5) in the same turn. `send` opens a confirmation dialog in Teams with the destination, the mentions and the rendered message, and posts only when the user clicks "Envoyer"; "Annuler" or Escape cancels, and the dialog expires after 5 minutes without an answer.
    - Display the exact `preview` text as a simple Markdown blockquote, prefixing every line with `> ` (including blank lines).
-   - Keep the message in a single quotation, with no added bold, frame, BEGIN/END delimiters, timestamp, destination, explanation or approval question inside it.
+   - Keep the message in a single quotation, with no added bold, frame, BEGIN/END delimiters, timestamp, destination, explanation or closing line inside it.
    - Escape literal Markdown characters when needed to preserve the visible message text.
    - Show the destination above the quotation: the `title`, its `kind`, and "réponse au fil" when `--reply-to` is used.
    - Below the quotation, name who each mention resolved to and describe any formatting the text preview cannot show (bold, colors, tables); omit these lines when there are no mentions or special formatting.
-   - The quote markers and approval question belong to the assistant response only; never add them to the message file or send them to Teams.
-   - Never run `send` in the same turn as the preview, and never without the user's explicit approval of that exact preview.
-   - If the user asks for a change, edit the file, preview again and ask again.
+   - The quote markers and the closing line belong to the assistant response only; never add them to the message file or send them to Teams.
+   - Only the user answers the dialog: never click, press keys in or script it, and never post by any other means (evaluate_script, direct Graph or chat service calls).
+   - If the user cancels, the dialog expires, or the user asks for a change: report it and wait for the user's instructions; never resend on your own. For a change, edit the file, preview again and send again, which opens a new dialog.
 
-   Approval response layout (replace the placeholders with the resolved values):
+   Preview response layout (replace the placeholders with the resolved values):
 
    ```text
    DESTINATION TEAMS : <destination>
@@ -69,17 +69,17 @@ Post messages with `__TEAMS_DIR__/teams_graph.py` and the thread id resolved abo
 
    <resolved mentions and formatting, if any>
 
-   Envoyer ce message exact ?
+   Confirme l'envoi dans la fenêtre Teams.
    ```
-5. Once approved, send exactly the previewed message with its approval code:
+5. Send exactly the previewed message with its approval code, with a command timeout of at least 400 seconds because it waits for the user (Claude Code Bash `timeout: 400000`, Codex `timeout_ms: 400000`):
    ```bash
    python3 __TEAMS_DIR__/teams_graph.py send '<conversationId>' --file /tmp/teams-message.html --mention 'Marie Boudet' --approval '<approval>'
    ```
-   Use the same file and options as the preview. `send` refuses to post when the message, conversation, reply target or resolved mentions differ from the approved preview; then preview again and get a new approval.
-6. On success the command prints the destination and the created message, including `messageId`, `content` as stored by Teams (`<pre>` becomes `<codeblock>`) and the posted `mentions`. On failure it exits with status 1 and prints the error: report it, and `read` the conversation before any retry so the message is never posted twice.
+   Use the same file and options as the preview. `send` refuses to post when the message, conversation, reply target or resolved mentions differ from the preview, and when another message is already waiting for confirmation; then preview again.
+6. On success the command prints the destination and the created message, including `messageId`, `content` as stored by Teams (`<pre>` becomes `<codeblock>`) and the posted `mentions`. On failure, including cancellation and expiry, it exits with status 1 and prints the error: report it, and `read` the conversation before any retry so the message is never posted twice.
 7. Apply the post-send verification below.
 
-File and image attachments are the only case these commands do not cover. They require the compose-box fallback, which takes over the shared UI: explain this and get the user's explicit go-ahead first, then apply the approval rule of step 4 before pasting.
+File and image attachments are the only case these commands do not cover. They require the compose-box fallback, which takes over the shared UI and has no confirmation dialog: explain this and get the user's explicit go-ahead first, then show the exact message with the step 4 layout, ending with "Envoyer ce message exact ?" instead of the dialog line, END YOUR TURN, and paste only after the user's explicit approval in the terminal.
 
 ## Post-send verification (ABSOLUTE — always re-read yourself)
 - AFTER sending any message, ALWAYS re-read what was actually posted to confirm the result matches what you intended. Do not assume it worked.
@@ -131,7 +131,7 @@ Only for file or image attachments, after the user's explicit go-ahead (see "Sen
   2. Use `evaluate_script` to write text to clipboard: `navigator.clipboard.writeText("your message")`
   3. Use `press_key` with Ctrl+V to paste
   4. Verify the content landed in the RIGHT compose box before sending (X11 screenshot via `~/binPerso/teams-screenshot.sh`, or take_snapshot for plain text)
-  5. Press Enter to send, only after the user approved the exact message (step 4 of "Sending messages through the API")
+  5. Press Enter to send, only after the user approved the exact message in the terminal (see "File and image attachments" above)
 - For FORMATTED messages (tables, lists, bold, etc.), do NOT use `writeText` (plain text) — Teams would show the raw markdown/source literally (ugly). Instead write **rich HTML** to the clipboard so Teams' rich editor renders it on paste:
   ```js
   const html = '<b>Title</b><table border="1"><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>';

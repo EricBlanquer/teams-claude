@@ -19,6 +19,7 @@ CDP_URL = "http://127.0.0.1:9333"
 TEAMS_HOSTS = {"teams.cloud.microsoft", "teams.microsoft.com"}
 PAGE_SCRIPT = Path(__file__).with_name("teams_graph.js")
 TIMEOUT_SECONDS = 60
+CONFIRMATION_TIMEOUT_SECONDS = 300
 EVALUATE_ID = 1
 BLOCK_TAGS = {"p", "div", "blockquote", "pre", "codeblock", "table", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6"}
 PREFORMATTED_TAGS = {"pre", "codeblock"}
@@ -193,13 +194,18 @@ async def evaluate(websocket_url, expression):
     return result["result"].get("value")
 
 
+def request_timeout(request):
+    return TIMEOUT_SECONDS + request.get("confirmationTimeoutSeconds", 0)
+
+
 def run(request, cdp_url=CDP_URL):
+    timeout = request_timeout(request)
     try:
         with urllib.request.urlopen(f"{cdp_url}/json/list", timeout=5) as response:
             targets = json.load(response)
-        outcome = asyncio.run(asyncio.wait_for(evaluate(teams_page(targets), page_expression(request)), TIMEOUT_SECONDS))
+        outcome = asyncio.run(asyncio.wait_for(evaluate(teams_page(targets), page_expression(request)), timeout))
     except asyncio.TimeoutError as ex:
-        raise TeamsGraphError(f"Teams did not answer within {TIMEOUT_SECONDS} s") from ex
+        raise TeamsGraphError(f"Teams did not answer within {timeout} s") from ex
     except (OSError, ValueError, websockets.WebSocketException) as ex:
         raise TeamsGraphError(f"Teams DevTools endpoint at {cdp_url} failed: {ex}") from ex
     if not isinstance(outcome, dict):
@@ -240,7 +246,7 @@ def main(argv=None):
     read.add_argument("--thread", metavar="MESSAGE_ID", help="read the replies of this channel post")
     read.add_argument("--limit", type=positive_integer, default=DEFAULT_MESSAGE_LIMIT)
     preview = commands.add_parser("preview", help="resolve and print a message and its approval code without posting it")
-    send = commands.add_parser("send", help="post a message the user approved after its preview")
+    send = commands.add_parser("send", help="post a previewed message once the user confirms it in the Teams dialog")
     for command in (preview, send):
         add_message_arguments(command)
     send.add_argument("--approval", required=True, metavar="CODE", help="approval code printed by preview for this exact message")
@@ -262,6 +268,7 @@ def main(argv=None):
             }
             if args.command == "send":
                 request["approval"] = args.approval
+                request["confirmationTimeoutSeconds"] = CONFIRMATION_TIMEOUT_SECONDS
         result = run(request)
         if args.command == "preview":
             result["preview"] = html_to_text(result["html"])
