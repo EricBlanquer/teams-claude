@@ -37,6 +37,9 @@
     var MISSING_USER_STATUSES = [403, 404];
     var NAME_BOUNDARY = '(?![\\p{L}\\p{N}])';
     var APPROVAL_CODE_BYTES = 6;
+    var IMAGE_URL_PATTERN = /^https:\/\/[a-z0-9-]+\.asm\.skype\.com\/v1\/objects\/[\w-]+\/views\/\w+$/;
+    var IMAGE_CONTENT_TYPE = /^image\/[\w.+-]+$/;
+    var BASE64_CHUNK_SIZE = 0x8000;
     var CONFIRMATION_DIALOG_ID = 'teams-assistant-send-confirmation';
     var CONFIRMATION_TITLE_ID = CONFIRMATION_DIALOG_ID + '-title';
     var CONFIRMATION_DESTINATION_ID = CONFIRMATION_DIALOG_ID + '-destination';
@@ -424,6 +427,34 @@
         });
     }
 
+    function base64(bytes) {
+        var binary = '';
+        for (var start = 0; start < bytes.length; start += BASE64_CHUNK_SIZE) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(start, start + BASE64_CHUNK_SIZE));
+        }
+        return btoa(binary);
+    }
+
+    async function downloadImage(token, url) {
+        if (!IMAGE_URL_PATTERN.test(url)) return {error: 'Not a Teams image: ' + url.split('?')[0]};
+        try {
+            var response = await fetch(url, {headers: {Authorization: 'Bearer ' + token}});
+            if (!response.ok) return {error: 'Teams image download failed with HTTP ' + response.status};
+            var contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+            if (!IMAGE_CONTENT_TYPE.test(contentType)) return {error: 'Teams image has an unexpected content type: ' + (contentType || 'none')};
+            return {contentType: contentType, data: base64(new Uint8Array(await response.arrayBuffer()))};
+        } catch (ex) {
+            return {error: 'Teams image download failed: ' + (ex && ex.message ? ex.message : String(ex))};
+        }
+    }
+
+    async function downloadImages(request) {
+        var urls = (request.urls || []).map(String);
+        if (!urls.length) return [];
+        var token = await accessToken(CHAT_SERVICE_RESOURCE);
+        return Promise.all(urls.map(function(url) { return downloadImage(token, url); }));
+    }
+
     function escapeRegExp(text) {
         return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
@@ -727,6 +758,7 @@
             if (request.action === 'current') return {ok: true, result: requestConversation()};
             if (request.action === 'chats') return {ok: true, result: await listConversations(request)};
             if (request.action === 'read') return {ok: true, result: await readMessages(request)};
+            if (request.action === 'images') return {ok: true, result: await downloadImages(request)};
             if (request.action === 'preview') return {ok: true, result: await previewMessage(request)};
             if (request.action === 'send') return {ok: true, result: await sendMessage(request)};
             throw new Error('Unknown action: ' + request.action);

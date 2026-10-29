@@ -93,6 +93,15 @@ function jsonResponse(status, payload) {
     return {ok: status >= 200 && status < 300, status, json: async () => payload};
 }
 
+function imageResponse(status, contentType, bytes = []) {
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: {get: name => (name.toLowerCase() === 'content-type' ? contentType : null)},
+        arrayBuffer: async () => new Uint8Array(bytes).buffer,
+    };
+}
+
 function found(body) {
     return {status: 200, body};
 }
@@ -177,7 +186,7 @@ function environment({
             if (!route) throw new Error(`Unexpected request ${init.method} ${url}`);
             return typeof route === 'function' ? route(url, init) : route;
         },
-        URLSearchParams, TextEncoder, crypto, Date,
+        URLSearchParams, TextEncoder, crypto, Date, btoa,
     };
     context.Date = class extends Date {
         static now() {
@@ -936,4 +945,47 @@ test('stops paging when the service repeats the same link', async () => {
     const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID, limit: 50});
     assert.equal(outcome.ok, true, outcome.error);
     assert.equal(env.requests.filter(request => request.url.includes('/messages')).length, 2);
+});
+
+test('downloads Teams images with the chat service token only', async () => {
+    const image = 'https://eu-api.asm.skype.com/v1/objects/0-frca-d9-6ced/views/imgo';
+    const missing = 'https://eu-api.asm.skype.com/v1/objects/0-frca-d9-gone/views/imgo';
+    const page = 'https://us-api.asm.skype.com/v1/objects/0-wus-d1-page/views/imgo';
+    const broken = 'https://eu-api.asm.skype.com/v1/objects/0-frca-d9-broken/views/imgo';
+    const large = Array.from({length: 70000}, (unused, index) => index % 256);
+    const env = environment({
+        routes: {
+            [`GET ${image}`]: imageResponse(200, 'Image/PNG; charset=binary', [137, 80, 78, 71]),
+            [`GET ${missing}`]: imageResponse(404, 'application/json'),
+            [`GET ${page}`]: imageResponse(200, 'text/html', [60]),
+            [`GET ${broken}`]: () => {
+                throw new Error('network down');
+            },
+            [`GET ${image.replace('6ced', 'large')}`]: imageResponse(200, 'image/jpeg', large),
+        },
+    });
+    const outcome = await env.teamsGraph({action: 'images', urls: [
+        image, missing, page, broken, image.replace('6ced', 'large'), 'https://eu-api.asm.skype.com.evil.example/v1/objects/x/views/imgo',
+        `https://evil.example/steal?next=${image}`, `${image}?token=1`, '',
+    ]});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.deepEqual(plain(outcome.result), [
+        {contentType: 'image/png', data: Buffer.from([137, 80, 78, 71]).toString('base64')},
+        {error: 'Teams image download failed with HTTP 404'},
+        {error: 'Teams image has an unexpected content type: text/html'},
+        {error: 'Teams image download failed: network down'},
+        {contentType: 'image/jpeg', data: Buffer.from(large).toString('base64')},
+        {error: 'Not a Teams image: https://eu-api.asm.skype.com.evil.example/v1/objects/x/views/imgo'},
+        {error: 'Not a Teams image: https://evil.example/steal'},
+        {error: `Not a Teams image: ${image}`},
+        {error: 'Not a Teams image: '},
+    ]);
+    assert.deepEqual(env.requests.map(request => [request.url, request.headers.Authorization]), [image, missing, page, broken, image.replace('6ced', 'large')]
+        .map(url => [url, 'Bearer chat-token']));
+});
+
+test('downloads no image without asking for a token', async () => {
+    const env = environment({credentials: []});
+    assert.deepEqual(plain(await env.teamsGraph({action: 'images', urls: []})), {ok: true, result: []});
+    assert.deepEqual(env.requests, []);
 });

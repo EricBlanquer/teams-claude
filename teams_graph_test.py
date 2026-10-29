@@ -161,6 +161,14 @@ class HtmlToTextTest(unittest.TestCase):
         )
         self.assertEqual(teams_graph.html_to_text(content), "@Marie Boudet et @Paul, 🙂\n\n[image]")
 
+    def test_collects_the_sources_of_shown_images_only(self):
+        content = (
+            '<p><img itemtype="http://schema.skype.com/Emoji" alt="🙂" src="emoji"></p>'
+            '<p><img itemtype="http://schema.skype.com/AMSImage" src="first"><img alt="no source"></p>'
+        )
+        renderer = teams_graph.rendered_html(content)
+        self.assertEqual((renderer.text(), renderer.images), ("🙂\n\n[image][image]", ["first", ""]))
+
     def test_prefixes_every_quoted_line(self):
         content = (
             '<blockquote itemtype="http://schema.skype.com/Reply"><strong>Anton</strong><span></span>'
@@ -185,6 +193,45 @@ class ReadableOutputTest(unittest.TestCase):
             {"id": "2", "time": "2026-10-21 09:01", "text": "a <b>"},
             {"id": "3", "time": None, "deleted": True},
         ]})
+
+    def test_saves_the_images_of_each_message(self):
+        conversation = {"messages": [
+            {"id": "1", "time": None, "html": '<p><img src="a"><img src="b"></p>'},
+            {"id": "2", "time": None, "html": "<p>no image</p>"},
+            {"id": "../3", "time": None, "html": '<img src="c">'},
+        ]}
+        downloads = [
+            {"contentType": "image/jpeg", "data": "AAEC"},
+            {"error": "Not a Teams image: b"},
+            {"contentType": "image/x-unknown", "data": "/w=="},
+        ]
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(teams_graph, "run", return_value=downloads) as run:
+            directory = Path(root) / "images"
+            result = teams_graph.readable_messages(conversation, image_directory=directory)
+            run.assert_called_once_with({"action": "images", "urls": ["a", "b", "c"]})
+            self.assertEqual([message.get("images") for message in result["messages"]], [
+                [{"file": str(directory / "1-1.jpg")}, {"error": "Not a Teams image: b"}],
+                None,
+                [{"file": str(directory / "___3-1.img")}],
+            ])
+            self.assertEqual((directory / "1-1.jpg").read_bytes(), bytes([0, 1, 2]))
+            self.assertEqual((directory / "___3-1.img").read_bytes(), bytes([255]))
+            self.assertEqual(sorted(path.name for path in directory.iterdir()), ["1-1.jpg", "___3-1.img"])
+
+    def test_downloads_nothing_without_an_image_directory_or_images(self):
+        with mock.patch.object(teams_graph, "run") as run, tempfile.TemporaryDirectory() as root:
+            plain = teams_graph.readable_messages({"messages": [{"id": "1", "time": None, "html": '<img src="a">'}]})
+            text_only = teams_graph.readable_messages({"messages": [{"id": "1", "time": None, "text": "a"}]}, image_directory=Path(root) / "new")
+            self.assertFalse((Path(root) / "new").exists())
+        run.assert_not_called()
+        self.assertEqual([plain["messages"], text_only["messages"]], [[{"id": "1", "time": None, "text": "[image]"}], [{"id": "1", "time": None, "text": "a"}]])
+
+    def test_rejects_inconsistent_image_answers(self):
+        conversation = {"messages": [{"id": "1", "time": None, "html": '<img src="a">'}]}
+        for answer, error in (([], "Unexpected image answer"), ([{"contentType": "image/png", "data": "not base64!"}], "undecodable image")):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as root, mock.patch.object(teams_graph, "run", return_value=answer):
+                with self.assertRaisesRegex(teams_graph.TeamsGraphError, error):
+                    teams_graph.readable_messages(json.loads(json.dumps(conversation)), image_directory=Path(root))
 
     def test_renders_last_activity_times(self):
         conversations = [{"title": "A", "lastActivity": "2026-10-20T22:30:00.000Z"}, {"title": "B", "lastActivity": None}]
@@ -309,6 +356,21 @@ class MainTest(unittest.TestCase):
         self.assertEqual(json.loads(stdout), {
             "notice": teams_graph.UNTRUSTED_NOTICE, "title": "Projet", "messages": [{"id": "1", "time": None, "text": "a & b"}],
         })
+
+    def test_reads_messages_with_their_images(self):
+        answer = {"messages": [{"id": "1", "time": None, "html": '<p><img src="a"></p>'}]}
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(teams_graph, "run", side_effect=[answer, [{"contentType": "image/png", "data": "iVBORw=="}]]) as run, \
+                contextlib.redirect_stdout(stdout):
+            self.assertEqual(teams_graph.main(["read", "48:notes", "--images", root]), 0)
+            self.assertEqual(run.call_args_list, [
+                mock.call({"action": "read", "conversationId": "48:notes", "threadId": None, "limit": 30}),
+                mock.call({"action": "images", "urls": ["a"]}),
+            ])
+            image = Path(root).resolve() / "1-1.png"
+            self.assertEqual(json.loads(stdout.getvalue())["messages"], [{"id": "1", "time": None, "text": "[image]", "images": [{"file": str(image)}]}])
+            self.assertEqual(image.read_bytes(), b"\x89PNG")
 
     def test_reads_the_default_number_of_messages(self):
         _, _, _, run = self.run_main(["read", "48:notes"], answer={"messages": []})

@@ -2,8 +2,11 @@
 
 import argparse
 import asyncio
+import base64
+import binascii
 import html
 import json
+import mimetypes
 import re
 import sys
 import urllib.request
@@ -44,6 +47,8 @@ UNSAFE_STYLE_VALUE = re.compile(r"url\s*\(|expression\s*\(|[<>\\]", re.IGNORECAS
 MENTION_ITEMTYPE = "schema.skype.com/Mention"
 EMOJI_ITEMTYPE = "schema.skype.com/Emoji"
 IMAGE_PLACEHOLDER = "[image]"
+IMAGE_FALLBACK_EXTENSION = ".img"
+UNSAFE_FILE_NAME_CHARACTERS = re.compile(r"[^\w-]")
 QUOTE_MARKER = "> "
 QUOTE_ONLY_LINE = re.compile(r"[> ]+")
 TIME_FORMAT = "%Y-%m-%d %H:%M"
@@ -129,6 +134,7 @@ class TextRenderer(HTMLParser):
         self.cells = 0
         self.quotes = 0
         self.mention = None
+        self.images = []
 
     def newline(self, text=""):
         self.parts.append("\n" + QUOTE_MARKER * self.quotes + text)
@@ -177,8 +183,11 @@ class TextRenderer(HTMLParser):
         elif tag == "span" and MENTION_ITEMTYPE in itemtype and attributes.get("itemid") != self.mention:
             self.mention = attributes.get("itemid")
             self.parts.append("@")
+        elif tag == "img" and EMOJI_ITEMTYPE in itemtype:
+            self.write(attributes.get("alt") or "")
         elif tag == "img":
-            self.write((attributes.get("alt") or "") if EMOJI_ITEMTYPE in itemtype else IMAGE_PLACEHOLDER)
+            self.images.append(attributes.get("src") or "")
+            self.write(IMAGE_PLACEHOLDER)
 
     def handle_endtag(self, tag):
         if tag in LIST_TAGS and self.lists:
@@ -198,11 +207,15 @@ class TextRenderer(HTMLParser):
         return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip("\n")
 
 
-def html_to_text(content):
+def rendered_html(content):
     renderer = TextRenderer()
     renderer.feed(content)
     renderer.close()
-    return renderer.text()
+    return renderer
+
+
+def html_to_text(content):
+    return rendered_html(content).text()
 
 
 def local_time(value, timezone=None):
@@ -211,11 +224,49 @@ def local_time(value, timezone=None):
     return datetime.fromisoformat(value).astimezone(timezone).strftime(TIME_FORMAT)
 
 
-def readable_messages(conversation, timezone=None):
+def saved_image(directory, name, download):
+    if "error" in download:
+        return {"error": download["error"]}
+    try:
+        content = base64.b64decode(download["data"], validate=True)
+    except (binascii.Error, ValueError) as ex:
+        raise TeamsGraphError(f"Teams returned an undecodable image: {ex}") from ex
+    extension = mimetypes.guess_extension(download["contentType"]) or IMAGE_FALLBACK_EXTENSION
+    path = directory / (UNSAFE_FILE_NAME_CHARACTERS.sub("_", name) + extension)
+    path.write_bytes(content)
+    return {"file": str(path)}
+
+
+def save_images(sources, directory):
+    urls = [url for message_sources in sources.values() for url in message_sources]
+    if not urls:
+        return {}
+    downloads = run({"action": "images", "urls": urls})
+    if not isinstance(downloads, list) or len(downloads) != len(urls):
+        raise TeamsGraphError("Unexpected image answer from the Teams page")
+    directory = directory.resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    remaining = iter(downloads)
+    return {
+        message_id: [saved_image(directory, f"{message_id}-{index}", next(remaining)) for index in range(1, len(message_sources) + 1)]
+        for message_id, message_sources in sources.items()
+    }
+
+
+def readable_messages(conversation, timezone=None, image_directory=None):
+    sources = {}
     for message in conversation["messages"]:
         message["time"] = local_time(message.get("time"), timezone)
         if "html" in message:
-            message["text"] = html_to_text(message.pop("html"))
+            renderer = rendered_html(message.pop("html"))
+            message["text"] = renderer.text()
+            if renderer.images:
+                sources[message["id"]] = renderer.images
+    if image_directory:
+        images = save_images(sources, image_directory)
+        for message in conversation["messages"]:
+            if message.get("id") in images:
+                message["images"] = images[message["id"]]
     return {"notice": UNTRUSTED_NOTICE, **conversation}
 
 
@@ -307,6 +358,7 @@ def main(argv=None):
     read.add_argument("conversation_id", help="Teams thread id of the chat or channel")
     read.add_argument("--thread", metavar="MESSAGE_ID", help="read the replies of this channel post")
     read.add_argument("--limit", type=positive_integer, default=DEFAULT_MESSAGE_LIMIT)
+    read.add_argument("--images", type=Path, metavar="DIR", help="save the images of the messages in DIR and list their files")
     preview = commands.add_parser("preview", help="resolve and print a message and its approval code without posting it")
     send = commands.add_parser("send", help="post a previewed message once the user confirms it in the Teams dialog")
     for command in (preview, send):
@@ -337,7 +389,7 @@ def main(argv=None):
         elif args.command == "chats":
             result = readable_conversations(result)
         elif args.command == "read":
-            result = readable_messages(result)
+            result = readable_messages(result, image_directory=args.images)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (TeamsGraphError, OSError) as ex:
         print(f"teams_graph: {ex}", file=sys.stderr)
