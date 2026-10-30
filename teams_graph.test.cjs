@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const { execFileSync } = require('node:child_process');
 
 const source = fs.readFileSync(`${__dirname}/teams_graph.js`, 'utf8');
 const NOW_SECONDS = 1_800_000_000;
@@ -18,25 +19,94 @@ const CHAT_MESSAGES = `POST ${GRAPH}/chats/${encodeURIComponent(CHAT_ID)}/messag
 const CHAT_MEMBERS = `GET ${GRAPH}/chats/${encodeURIComponent(CHAT_ID)}/members`;
 const CHANNEL_PATH = `${GRAPH}/teams/team-x/channels/${encodeURIComponent(CHANNEL_ID)}`;
 const DIALOG_ID = 'teams-assistant-send-confirmation';
+const HTML_RULES = JSON.parse(execFileSync('python3', ['-c', 'import json, teams_graph; print(json.dumps(teams_graph.HTML_RULES))'], {cwd: __dirname}));
+const VOID_TAGS = new Set(['br', 'hr']);
+
+class FakeText {
+    constructor(data) {
+        this.data = data;
+        this.parent = null;
+    }
+
+    get textContent() {
+        return this.data;
+    }
+
+    get outerHTML() {
+        return this.data.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    cloneNode() {
+        return new FakeText(this.data);
+    }
+
+    descendants() {
+        return [];
+    }
+}
 
 class FakeElement {
     constructor(owner, tag) {
         this.owner = owner;
+        this.localName = tag;
         this.tagName = tag.toUpperCase();
         this.style = {};
-        this.attributes = {};
+        this.attributeMap = new Map();
         this.children = [];
         this.listeners = {};
         this.parent = null;
-        this.textContent = '';
+    }
+
+    get attributes() {
+        return Array.from(this.attributeMap, ([name, value]) => ({name, value}));
     }
 
     setAttribute(name, value) {
-        this.attributes[name] = String(value);
+        this.attributeMap.set(name, String(value));
     }
 
     getAttribute(name) {
-        return this.attributes[name] ?? null;
+        return this.attributeMap.get(name) ?? null;
+    }
+
+    hasAttribute(name) {
+        return this.attributeMap.has(name);
+    }
+
+    removeAttribute(name) {
+        this.attributeMap.delete(name);
+    }
+
+    get textContent() {
+        return this.children.map(child => child.textContent).join('');
+    }
+
+    set textContent(text) {
+        this.children = [];
+        this.append(new FakeText(text));
+    }
+
+    get innerHTML() {
+        return this.children.map(child => child.outerHTML).join('');
+    }
+
+    get outerHTML() {
+        const attributes = this.attributes.map(({name, value}) => ` ${name}="${value.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`).join('');
+        return `<${this.localName}${attributes}>` + (VOID_TAGS.has(this.localName) ? '' : `${this.innerHTML}</${this.localName}>`);
+    }
+
+    cloneNode() {
+        const clone = new FakeElement(this.owner, this.localName);
+        this.attributeMap.forEach((value, name) => clone.setAttribute(name, value));
+        clone.append(...this.children.map(child => child.cloneNode()));
+        return clone;
+    }
+
+    querySelectorAll(selector) {
+        const elements = this.descendants().filter(node => node instanceof FakeElement);
+        if (selector === '*') return elements;
+        const attribute = /^\[([\w-]+)\]$/.exec(selector);
+        return elements.filter(node => (attribute ? node.hasAttribute(attribute[1]) : node.localName === selector));
     }
 
     append(...nodes) {
@@ -68,10 +138,41 @@ class FakeElement {
 
     focus() {
         this.owner.activeElement = this;
+        if (this.owner.frame) this.owner.frame.owner.activeElement = this.owner.frame;
     }
 
     descendants() {
         return this.children.flatMap(child => [child, ...child.descendants()]);
+    }
+}
+
+class FakeFrameDocument {
+    constructor(frame) {
+        this.frame = frame;
+        this.URL = frame.src;
+        this.activeElement = null;
+        this.listeners = {};
+        this.commands = [];
+    }
+
+    element(tag, attributes = {}, ...children) {
+        const node = new FakeElement(this, tag);
+        Object.entries(attributes).forEach(([name, value]) => node.setAttribute(name, value));
+        node.append(...children.map(child => (typeof child === 'string' ? new FakeText(child) : child)));
+        return node;
+    }
+
+    addEventListener(type, listener) {
+        (this.listeners[type] ||= []).push(listener);
+    }
+
+    dispatch(type, event = {}) {
+        (this.listeners[type] || []).forEach(listener => listener({preventDefault() {}, stopPropagation() {}, ...event}));
+    }
+
+    execCommand(...args) {
+        this.commands.push(args);
+        return true;
     }
 }
 
@@ -200,7 +301,8 @@ function environment({
     return {
         teamsGraph, requests, writes, window, listeners, removed, timers, blobs, revoked, document: context.document, dialog,
         button: label => dialog().descendants().find(node => node.tagName === 'BUTTON' && node.textContent === label),
-        texts: () => dialog().descendants().filter(node => node.tagName === 'P').map(node => node.textContent),
+        frame: () => dialog().descendants().find(node => node.tagName === 'IFRAME'),
+        texts: () => dialog().descendants().filter(node => node.tagName === 'P' && !node.hidden).map(node => node.textContent),
         expire: () => timers.filter(Boolean).forEach(timer => timer.callback()),
         press: event => listeners.forEach(entry => entry.listener({key: 'Enter', ...event})),
         setDisplayed: (newElements, newTitle) => {
@@ -231,7 +333,7 @@ async function whenDialogShown(env, sending, decide) {
 async function startSend(env, request) {
     const preview = await env.teamsGraph({...request, action: 'preview'});
     if (!preview.ok) return {preview};
-    return {preview, sending: env.teamsGraph({...request, action: 'send', approval: preview.result.approval})};
+    return {preview, sending: env.teamsGraph({...request, action: 'send', approval: preview.result.approval, htmlRules: HTML_RULES})};
 }
 
 async function approvedSend(env, request, decide = confirmInTeams) {
@@ -669,7 +771,7 @@ test('refuses an approval code from another message, conversation, reply target 
         {html: 'Hi @Curie', mentions: ['Curie']},
     ];
     for (const change of changes) {
-        const outcome = await env.teamsGraph({...approved, ...change, action: 'send', approval});
+        const outcome = await env.teamsGraph({...approved, ...change, action: 'send', approval, htmlRules: HTML_RULES});
         assert.deepEqual({...outcome}, {ok: false, error: 'The message, conversation or mentions differ from the approved preview'});
     }
     assert.equal(posts(env).length, 0);
@@ -697,13 +799,16 @@ test('asks the user in Teams before posting and restores the focus', async () =>
         assert.equal(dialog.getAttribute('aria-modal'), 'true');
         assert.equal(current.document.getElementById(dialog.getAttribute('aria-labelledby')).textContent, 'Envoyer ce message\u00A0?');
         assert.equal(current.document.getElementById(dialog.getAttribute('aria-describedby')).textContent, 'Destination\u00A0: Projet');
-        assert.deepEqual(current.texts(), ['Destination\u00A0: Projet', 'Sans réponse, l\u2019envoi est annulé dans 5\u00A0min.']);
-        const frame = current.dialog().descendants().find(node => node.tagName === 'IFRAME');
-        assert.equal(frame.getAttribute('sandbox'), '');
+        assert.deepEqual(current.texts(), [
+            'Destination\u00A0: Projet', 'Le message est modifiable avant l\u2019envoi. Sans réponse, l\u2019envoi est annulé dans 5\u00A0min.',
+        ]);
+        const frame = current.frame();
+        assert.equal(frame.getAttribute('sandbox'), 'allow-same-origin');
+        assert.equal(frame.title, 'Message à envoyer, modifiable');
         assert.equal(frame.getAttribute('tabindex'), '-1');
         assert.equal(frame.src, 'blob:preview-1');
         assert.equal(current.blobs[0].type, 'text/html');
-        assert.match(current.blobs[0].content, /^<!doctype html>.*<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>.*<\/style><\/head><body><p>Bonjour<\/p><\/body><\/html>$/);
+        assert.match(current.blobs[0].content, /^<!doctype html>.*<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>.*<\/style><\/head><body contenteditable="true"><p>Bonjour<\/p><\/body><\/html>$/);
         assert.equal(current.document.activeElement, current.button('Annuler'));
         assert.equal(current.timers[0].delay, 300_000);
         assert.equal(posts(current).length, 0);
@@ -745,7 +850,7 @@ test('expires when the user does not answer', async () => {
     const env = environment();
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi', confirmationTimeoutSeconds: 90}, current => {
         assert.equal(current.timers[0].delay, 90_000);
-        assert.equal(current.texts()[1], 'Sans réponse, l\u2019envoi est annulé dans 2\u00A0min.');
+        assert.equal(current.texts()[1], 'Le message est modifiable avant l\u2019envoi. Sans réponse, l\u2019envoi est annulé dans 2\u00A0min.');
         const send = current.button('Envoyer');
         current.expire();
         send.dispatch('click', {isTrusted: true});
@@ -770,6 +875,162 @@ test('shows the reply target and mentions, and refuses a second pending message'
     });
     assert.equal(outcome.error, 'The user cancelled the message in the Teams confirmation dialog');
     assert.equal(posts(env).length, 0);
+});
+
+function openEditor(env, ...children) {
+    const frame = env.frame();
+    const editor = new FakeFrameDocument(frame);
+    editor.body = editor.element('body', {contenteditable: 'true'}, ...children);
+    frame.contentDocument = editor;
+    frame.dispatch('load');
+    return editor;
+}
+
+function mentionedMarie() {
+    return mentionEnvironment([member('u-marie', 'Marie Boudet')], {'u-marie': jsonResponse(200, {givenName: 'Marie'})});
+}
+
+const MARIE_MENTION = {
+    id: 0,
+    mentionText: 'Marie',
+    mentioned: {user: {
+        '@odata.type': '#microsoft.graph.teamworkUserIdentity', id: 'u-marie', displayName: 'Marie Boudet', userIdentityType: 'aadUser', tenantId: 'tenant-id',
+    }},
+};
+
+test('posts the message edited in the dialog with the styles Teams renders only', async () => {
+    const env = mentionedMarie();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '<p>Bonjour @Marie</p>', mentions: ['Marie']}, current => {
+        const editor = openEditor(current);
+        const mention = editor.element('at', {id: '0'}, 'Marie');
+        const paragraph = editor.element('p', {}, 'Bonjour ', mention);
+        editor.body.append(paragraph);
+        assert.equal(mention.getAttribute('contenteditable'), null);
+        current.frame().dispatch('load');
+        assert.equal(mention.getAttribute('contenteditable'), 'false');
+        const merged = editor.element('span', {style: 'font-size: 14px; font-weight: normal;'}, ' et merci');
+        const hidden = editor.element('b', {style: 'display:none'}, '!');
+        const unsafe = editor.element('span', {style: 'color: red; background-color: url(https://x)'}, '?');
+        paragraph.append(merged, hidden, unsafe);
+        editor.dispatch('input');
+        assert.equal(merged.getAttribute('style'), 'font-weight:normal');
+        assert.equal(hidden.hasAttribute('style'), false);
+        assert.equal(unsafe.getAttribute('style'), 'color:red');
+        confirmInTeams(current);
+    });
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.editedByUser, true);
+    assert.deepEqual(postedBody(env), {
+        body: {contentType: 'html', content: '<p>Bonjour <at id="0">Marie</at><span style="font-weight:normal"> et merci</span><b>!</b><span style="color:red">?</span></p>'},
+        mentions: [MARIE_MENTION],
+    });
+});
+
+test('drops the mentions removed from the message in the dialog', async () => {
+    const env = mentionedMarie();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'Bonjour @Marie', mentions: ['Marie']}, current => {
+        const editor = openEditor(current, 'Bonjour ', 'Marie, merci');
+        editor.dispatch('input');
+        confirmInTeams(current);
+    });
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.deepEqual(postedBody(env), {body: {contentType: 'html', content: 'Bonjour Marie, merci'}});
+});
+
+test('keeps the dialog open until an unsupported, empty or lost edit is fixed or cancelled', async () => {
+    const env = environment();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '<p>hi</p>'}, current => {
+        const editor = openEditor(current);
+        editor.body.append(
+            editor.element('p', {}, 'hi'),
+            editor.element('font', {color: 'red'}, 'a'),
+            editor.element('span', {class: 'x'}, 'b'),
+            editor.element('a', {href: 'javascript:alert(1)'}, 'c'),
+            editor.element('at', {id: '3'}, 'Paul'),
+            editor.element('span', {class: 'y'}, 'd'),
+        );
+        editor.dispatch('input');
+        confirmInTeams(current);
+        assert.deepEqual(current.texts().slice(1, 2), [
+            'Mise en forme non prise en charge par Teams : <font>, attribut class sur <span>, lien vers javascript:alert(1), mention inconnue',
+        ]);
+        assert.equal(current.document.getElementById('teams-assistant-send-confirmation-error').getAttribute('role'), 'alert');
+        assert.equal(editor.activeElement, editor.body);
+        assert.equal(current.document.activeElement, current.frame());
+        editor.body.children = [];
+        editor.dispatch('input');
+        assert.equal(current.texts().length, 2);
+        confirmInTeams(current);
+        assert.equal(current.texts()[1], 'Le message est vide.');
+        editor.body.append(editor.element('p', {}, 'ok'));
+        editor.dispatch('input');
+        editor.URL = 'about:blank';
+        current.button('Annuler').focus();
+        confirmInTeams(current);
+        assert.equal(current.texts()[1], 'Le message modifié n’est plus disponible.');
+        assert.equal(current.document.activeElement, current.frame());
+        assert.equal(posts(current).length, 0);
+        editor.dispatch('keydown', {key: 'Escape'});
+    });
+    assert.equal(outcome.error, 'The user cancelled the message in the Teams confirmation dialog');
+    assert.equal(posts(env).length, 0);
+});
+
+test('pastes plain text only, ignores drops and cycles the focus through the message and buttons', async () => {
+    const env = environment({routes: {[CHAT_MESSAGES]: jsonResponse(201, {id: '42'})}});
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '<p>hi</p>'}, current => {
+        const editor = openEditor(current, 'hi');
+        const prevented = [];
+        const clipboardData = {getData: type => (type === 'text/plain' ? 'collé' : '<b style="font-size:30px">collé</b>')};
+        editor.dispatch('paste', {clipboardData, preventDefault: () => prevented.push('paste')});
+        editor.dispatch('drop', {preventDefault: () => prevented.push('drop')});
+        assert.deepEqual(prevented, ['paste', 'drop']);
+        assert.deepEqual(editor.commands, [['insertText', false, 'collé']]);
+        const overlay = current.dialog();
+        overlay.dispatch('keydown', {key: 'Tab'});
+        assert.equal(current.document.activeElement, current.button('Envoyer'));
+        overlay.dispatch('keydown', {key: 'Tab'});
+        assert.equal(editor.activeElement, editor.body);
+        assert.equal(current.document.activeElement, current.frame());
+        editor.dispatch('keydown', {key: 'Tab'});
+        assert.equal(current.document.activeElement, current.button('Annuler'));
+        overlay.dispatch('keydown', {key: 'Tab', shiftKey: true});
+        assert.equal(current.document.activeElement, current.frame());
+        editor.dispatch('keydown', {key: 'Tab', shiftKey: true});
+        assert.equal(current.document.activeElement, current.button('Envoyer'));
+        editor.dispatch('keydown', {key: 'Escape', isComposing: true});
+        assert.notEqual(current.dialog(), null);
+        confirmInTeams(current);
+    });
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.editedByUser, undefined);
+    assert.deepEqual(postedBody(env), {body: {contentType: 'html', content: '<p>hi</p>'}});
+});
+
+test('ignores a frame that no longer shows the message', async () => {
+    const env = environment();
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'}, current => {
+        const frame = current.frame();
+        const editor = new FakeFrameDocument(frame);
+        editor.URL = 'about:blank';
+        editor.body = editor.element('body', {}, editor.element('at', {id: '0'}, 'x'));
+        frame.contentDocument = editor;
+        frame.dispatch('load');
+        assert.deepEqual(editor.listeners, {});
+        assert.equal(editor.body.children[0].getAttribute('contenteditable'), null);
+        current.button('Annuler').dispatch('click');
+    });
+    assert.equal(outcome.error, 'The user cancelled the message in the Teams confirmation dialog');
+});
+
+test('refuses to send without the HTML rules of the dialog editor', async () => {
+    const env = environment();
+    const preview = await env.teamsGraph({action: 'preview', conversationId: CHAT_ID, html: 'hi'});
+    const requestCount = env.requests.length;
+    const outcome = await env.teamsGraph({action: 'send', conversationId: CHAT_ID, html: 'hi', approval: preview.result.approval});
+    assert.deepEqual({...outcome}, {ok: false, error: 'The message HTML rules are required to edit the message in the confirmation dialog'});
+    assert.equal(env.requests.length, requestCount);
+    assert.equal(env.dialog(), null);
 });
 
 function membersUrl(chatId) {

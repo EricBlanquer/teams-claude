@@ -44,6 +44,14 @@ STYLE_PROPERTIES = {
 }
 LINK_SCHEMES = ("https:", "http:", "mailto:")
 UNSAFE_STYLE_VALUE = re.compile(r"url\s*\(|expression\s*\(|[<>\\]", re.IGNORECASE)
+HTML_RULES = {
+    "tags": sorted(ALLOWED_TAGS),
+    "commonAttributes": sorted(COMMON_ATTRIBUTES),
+    "tagAttributes": {tag: sorted(names) for tag, names in TAG_ATTRIBUTES.items()},
+    "styles": sorted(STYLE_PROPERTIES),
+    "linkSchemes": list(LINK_SCHEMES),
+    "unsafeStyleValue": UNSAFE_STYLE_VALUE.pattern,
+}
 MENTION_ITEMTYPE = "schema.skype.com/Mention"
 EMOJI_ITEMTYPE = "schema.skype.com/Emoji"
 IMAGE_PLACEHOLDER = "[image]"
@@ -383,6 +391,7 @@ def main(argv=None):
             if args.command == "send":
                 request["approval"] = args.approval
                 request["confirmationTimeoutSeconds"] = CONFIRMATION_TIMEOUT_SECONDS
+                request["htmlRules"] = HTML_RULES
         result = run(request)
         if args.command == "preview":
             result["preview"] = html_to_text(result["html"])

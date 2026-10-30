@@ -290,6 +290,7 @@ class MainTest(unittest.TestCase):
         run.assert_called_once_with({
             "action": "send", "conversationId": "19:a@thread.v2", "replyTo": None, "html": "<b>é</b>", "mentions": [],
             "approval": "abc", "confirmationTimeoutSeconds": teams_graph.CONFIRMATION_TIMEOUT_SECONDS,
+            "htmlRules": teams_graph.HTML_RULES,
         })
         self.assertEqual(json.loads(stdout), {"messageId": "1"})
 
@@ -305,6 +306,7 @@ class MainTest(unittest.TestCase):
         run.assert_called_once_with({
             "action": "send", "conversationId": "19:c@thread.tacv2", "replyTo": "123", "html": "x &lt; y", "mentions": [],
             "approval": "abc", "confirmationTimeoutSeconds": teams_graph.CONFIRMATION_TIMEOUT_SECONDS,
+            "htmlRules": teams_graph.HTML_RULES,
         })
 
     def test_passes_every_mention(self):
