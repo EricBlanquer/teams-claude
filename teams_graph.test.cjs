@@ -203,6 +203,15 @@ function imageResponse(status, contentType, bytes = []) {
     };
 }
 
+function fileResponse(status, bytes = [], contentLength = null) {
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: {get: name => (name.toLowerCase() === 'content-length' && contentLength !== null ? String(contentLength) : null)},
+        arrayBuffer: async () => new Uint8Array(bytes).buffer,
+    };
+}
+
 function found(body) {
     return {status: 200, body};
 }
@@ -1160,7 +1169,11 @@ test('summarizes message details', async () => {
             [`GET ${messagesUrl(CHAT_ID)}`]: jsonResponse(200, {
                 messages: [
                     message('5', {messagetype: 'Text', content: 'a < b', imdisplayname: '', fromDisplayNameInToken: 'Bob​'}),
-                    message('4', {properties: {files: JSON.stringify([{fileName: 'report.pdf'}, {title: 'notes.txt'}, {}])}}),
+                    message('4', {properties: {files: JSON.stringify([
+                        {fileName: 'report.pdf', sharepointIds: {driveId: 'b!drive-1'}, fileInfo: {itemId: 'ITEM1'}},
+                        {title: 'notes.txt', sharepointIds: {driveId: 'b!drive-1'}},
+                        {},
+                    ])}}),
                     message('3', {properties: {deletetime: 1, edittime: 1}, content: ''}),
                     message('2', {properties: {edittime: 1792529524490, subject: 'Release', files: 'not json'}}),
                     message('1', {imdisplayname: null, composetime: 'bad', originalarrivaltime: '2026-10-21T07:00:00Z', properties: {files: '[]'}}),
@@ -1173,7 +1186,10 @@ test('summarizes message details', async () => {
         {id: '1', time: '2026-10-21T07:00:00.000Z', author: null, html: '<p>1</p>'},
         {id: '2', time: '2026-10-21T07:12:44.096Z', author: 'Alice', subject: 'Release', edited: true, html: '<p>2</p>'},
         {id: '3', time: '2026-10-21T07:12:44.096Z', author: 'Alice', deleted: true},
-        {id: '4', time: '2026-10-21T07:12:44.096Z', author: 'Alice', html: '<p>4</p>', files: ['report.pdf', 'notes.txt']},
+        {id: '4', time: '2026-10-21T07:12:44.096Z', author: 'Alice', html: '<p>4</p>', files: [
+            {name: 'report.pdf', driveId: 'b!drive-1', itemId: 'ITEM1'},
+            {name: 'notes.txt'},
+        ]},
         {id: '5', time: '2026-10-21T07:12:44.096Z', author: 'Bob', text: 'a < b'},
     ]);
 });
@@ -1248,5 +1264,59 @@ test('downloads Teams images with the chat service token only', async () => {
 test('downloads no image without asking for a token', async () => {
     const env = environment({credentials: []});
     assert.deepEqual(plain(await env.teamsGraph({action: 'images', urls: []})), {ok: true, result: []});
+    assert.deepEqual(env.requests, []);
+});
+
+function fileContentUrl(driveId, itemId) {
+    return `${GRAPH}/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(itemId)}/content`;
+}
+
+test('downloads attached files with the Graph files token only', async () => {
+    const drive = 'b!EZ7z-ihQ_RhU';
+    const oversized = new Uint8Array(20 * 1024 * 1024 + 1);
+    const env = environment({
+        credentials: [...VALID_TOKENS, accessToken('files-token', NOW_SECONDS + 3600, 'https://graph.microsoft.com/Files.ReadWrite.All')],
+        routes: {
+            [`GET ${fileContentUrl(drive, 'OK1')}`]: fileResponse(200, [104, 105], 2),
+            [`GET ${fileContentUrl(drive, 'MISSING')}`]: fileResponse(404),
+            [`GET ${fileContentUrl(drive, 'DECLARED')}`]: fileResponse(200, [1], 20 * 1024 * 1024 + 1),
+            [`GET ${fileContentUrl(drive, 'BODY')}`]: fileResponse(200, oversized),
+            [`GET ${fileContentUrl(drive, 'BROKEN')}`]: () => {
+                throw new Error('network down');
+            },
+        },
+    });
+    const outcome = await env.teamsGraph({action: 'files', files: [
+        {driveId: drive, itemId: 'OK1'}, {driveId: drive, itemId: 'MISSING'}, {driveId: drive, itemId: 'DECLARED'},
+        {driveId: drive, itemId: 'BODY'}, {driveId: drive, itemId: 'BROKEN'},
+        {driveId: 'drive-without-prefix', itemId: 'OK1'}, {driveId: drive, itemId: '../../me'}, {driveId: drive}, null,
+    ]});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.deepEqual(plain(outcome.result), [
+        {data: Buffer.from('hi').toString('base64')},
+        {error: 'Teams file download failed with HTTP 404'},
+        {error: `Teams file is larger than ${20 * 1024 * 1024} bytes: ${20 * 1024 * 1024 + 1}`},
+        {error: `Teams file is larger than ${20 * 1024 * 1024} bytes: ${20 * 1024 * 1024 + 1}`},
+        {error: 'Teams file download failed: network down'},
+        {error: 'Not a OneDrive or SharePoint file'},
+        {error: 'Not a OneDrive or SharePoint file'},
+        {error: 'Not a OneDrive or SharePoint file'},
+        {error: 'Not a OneDrive or SharePoint file'},
+    ]);
+    assert.deepEqual(env.requests.map(request => [request.url, request.headers.Authorization]), ['OK1', 'MISSING', 'DECLARED', 'BODY', 'BROKEN']
+        .map(itemId => [fileContentUrl(drive, itemId), 'Bearer files-token']));
+});
+
+test('refuses to download files without a token able to read them', async () => {
+    const env = environment();
+    const outcome = await env.teamsGraph({action: 'files', files: [{driveId: 'b!drive', itemId: 'ITEM'}]});
+    assert.equal(outcome.error, 'No valid Graph files token is cached and 0 Teams refresh tokens were found');
+    assert.deepEqual(env.requests, []);
+});
+
+test('downloads no file without asking for a token', async () => {
+    const env = environment({credentials: []});
+    assert.deepEqual(plain(await env.teamsGraph({action: 'files', files: []})), {ok: true, result: []});
+    assert.deepEqual(plain(await env.teamsGraph({action: 'files'})), {ok: true, result: []});
     assert.deepEqual(env.requests, []);
 });

@@ -233,6 +233,63 @@ class ReadableOutputTest(unittest.TestCase):
                 with self.assertRaisesRegex(teams_graph.TeamsGraphError, error):
                     teams_graph.readable_messages(json.loads(json.dumps(conversation)), image_directory=Path(root))
 
+    def test_lists_attached_file_names_without_a_file_directory(self):
+        conversation = {"messages": [{"id": "1", "time": None, "text": "a", "files": [{"name": "a.txt", "driveId": "b!d", "itemId": "I1"}, {"name": "b.log"}]}]}
+        with mock.patch.object(teams_graph, "run") as run:
+            result = teams_graph.readable_messages(conversation)
+        run.assert_not_called()
+        self.assertEqual(result["messages"], [{"id": "1", "time": None, "text": "a", "files": ["a.txt", "b.log"]}])
+
+    def test_saves_the_attached_files_of_each_message(self):
+        conversation = {"messages": [
+            {"id": "1", "time": None, "text": "a", "files": [
+                {"name": "ICP-1_labqa.log", "driveId": "b!d", "itemId": "I1"},
+                {"name": "../secret report.txt", "driveId": "b!d", "itemId": "I2"},
+            ]},
+            {"id": "2", "time": None, "text": "no file"},
+            {"id": "../3", "time": None, "text": "c", "files": [{"name": "c.txt"}]},
+        ]}
+        downloads = [{"data": "AAEC"}, {"error": "Teams file download failed with HTTP 404"}, {"data": "/w=="}]
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(teams_graph, "run", return_value=downloads) as run:
+            directory = Path(root) / "files"
+            result = teams_graph.readable_messages(conversation, file_directory=directory)
+            run.assert_called_once_with({"action": "files", "files": [
+                {"driveId": "b!d", "itemId": "I1"}, {"driveId": "b!d", "itemId": "I2"}, {"driveId": None, "itemId": None},
+            ]})
+            self.assertEqual([message.get("files") for message in result["messages"]], [
+                [
+                    {"name": "ICP-1_labqa.log", "file": str(directory / "1-ICP-1_labqa.log")},
+                    {"name": "../secret report.txt", "error": "Teams file download failed with HTTP 404"},
+                ],
+                None,
+                [{"name": "c.txt", "file": str(directory / "___3-c.txt")}],
+            ])
+            self.assertEqual((directory / "1-ICP-1_labqa.log").read_bytes(), bytes([0, 1, 2]))
+            self.assertEqual((directory / "___3-c.txt").read_bytes(), bytes([255]))
+            self.assertEqual(sorted(path.name for path in directory.iterdir()), ["1-ICP-1_labqa.log", "___3-c.txt"])
+
+    def test_keeps_attached_file_names_inside_the_directory(self):
+        conversation = {"messages": [{"id": "1", "time": None, "text": "a", "files": [{"name": "../../etc/x y.txt", "driveId": "b!d", "itemId": "I1"}]}]}
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(teams_graph, "run", return_value=[{"data": "AA=="}]):
+            directory = Path(root) / "files"
+            result = teams_graph.readable_messages(conversation, file_directory=directory)
+            saved = Path(result["messages"][0]["files"][0]["file"])
+            self.assertEqual((saved.parent, saved.name), (directory.resolve(), "1-.._.._etc_x_y.txt"))
+
+    def test_downloads_nothing_without_attached_files(self):
+        with mock.patch.object(teams_graph, "run") as run, tempfile.TemporaryDirectory() as root:
+            result = teams_graph.readable_messages({"messages": [{"id": "1", "time": None, "text": "a"}]}, file_directory=Path(root) / "new")
+            self.assertFalse((Path(root) / "new").exists())
+        run.assert_not_called()
+        self.assertEqual(result["messages"], [{"id": "1", "time": None, "text": "a"}])
+
+    def test_rejects_inconsistent_file_answers(self):
+        conversation = {"messages": [{"id": "1", "time": None, "text": "a", "files": [{"name": "a.txt", "driveId": "b!d", "itemId": "I1"}]}]}
+        for answer, error in (([], "Unexpected file answer"), ([{"data": "not base64!"}], "undecodable file")):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as root, mock.patch.object(teams_graph, "run", return_value=answer):
+                with self.assertRaisesRegex(teams_graph.TeamsGraphError, error):
+                    teams_graph.readable_messages(json.loads(json.dumps(conversation)), file_directory=Path(root))
+
     def test_renders_last_activity_times(self):
         conversations = [{"title": "A", "lastActivity": "2026-10-20T22:30:00.000Z"}, {"title": "B", "lastActivity": None}]
         self.assertEqual(teams_graph.readable_conversations(conversations, PARIS_SUMMER), [
@@ -358,6 +415,23 @@ class MainTest(unittest.TestCase):
         self.assertEqual(json.loads(stdout), {
             "notice": teams_graph.UNTRUSTED_NOTICE, "title": "Projet", "messages": [{"id": "1", "time": None, "text": "a & b"}],
         })
+
+    def test_reads_messages_with_their_attached_files(self):
+        answer = {"messages": [{"id": "1", "time": None, "text": "logs", "files": [{"name": "run.log", "driveId": "b!d", "itemId": "I1"}]}]}
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(teams_graph, "run", side_effect=[answer, [{"data": "aGk="}]]) as run, \
+                contextlib.redirect_stdout(stdout):
+            self.assertEqual(teams_graph.main(["read", "48:notes", "--files", root]), 0)
+            self.assertEqual(run.call_args_list, [
+                mock.call({"action": "read", "conversationId": "48:notes", "threadId": None, "limit": 30}),
+                mock.call({"action": "files", "files": [{"driveId": "b!d", "itemId": "I1"}]}),
+            ])
+            saved = Path(root).resolve() / "1-run.log"
+            self.assertEqual(json.loads(stdout.getvalue())["messages"], [
+                {"id": "1", "time": None, "text": "logs", "files": [{"name": "run.log", "file": str(saved)}]},
+            ])
+            self.assertEqual(saved.read_bytes(), b"hi")
 
     def test_reads_messages_with_their_images(self):
         answer = {"messages": [{"id": "1", "time": None, "html": '<p><img src="a"></p>'}]}

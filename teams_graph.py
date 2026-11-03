@@ -57,6 +57,7 @@ EMOJI_ITEMTYPE = "schema.skype.com/Emoji"
 IMAGE_PLACEHOLDER = "[image]"
 IMAGE_FALLBACK_EXTENSION = ".img"
 UNSAFE_FILE_NAME_CHARACTERS = re.compile(r"[^\w-]")
+UNSAFE_ATTACHMENT_NAME_CHARACTERS = re.compile(r"[^\w.-]")
 QUOTE_MARKER = "> "
 QUOTE_ONLY_LINE = re.compile(r"[> ]+")
 TIME_FORMAT = "%Y-%m-%d %H:%M"
@@ -232,37 +233,68 @@ def local_time(value, timezone=None):
     return datetime.fromisoformat(value).astimezone(timezone).strftime(TIME_FORMAT)
 
 
+def decoded_content(download, kind):
+    try:
+        return base64.b64decode(download["data"], validate=True)
+    except (binascii.Error, ValueError) as ex:
+        raise TeamsGraphError(f"Teams returned an undecodable {kind}: {ex}") from ex
+
+
 def saved_image(directory, name, download):
     if "error" in download:
         return {"error": download["error"]}
-    try:
-        content = base64.b64decode(download["data"], validate=True)
-    except (binascii.Error, ValueError) as ex:
-        raise TeamsGraphError(f"Teams returned an undecodable image: {ex}") from ex
+    content = decoded_content(download, "image")
     extension = mimetypes.guess_extension(download["contentType"]) or IMAGE_FALLBACK_EXTENSION
     path = directory / (UNSAFE_FILE_NAME_CHARACTERS.sub("_", name) + extension)
     path.write_bytes(content)
     return {"file": str(path)}
 
 
+def saved_file(directory, message_id, attachment, download):
+    if "error" in download:
+        return {"name": attachment["name"], "error": download["error"]}
+    content = decoded_content(download, "file")
+    name = UNSAFE_FILE_NAME_CHARACTERS.sub("_", message_id) + "-" + UNSAFE_ATTACHMENT_NAME_CHARACTERS.sub("_", attachment["name"])
+    path = directory / name
+    path.write_bytes(content)
+    return {"name": attachment["name"], "file": str(path)}
+
+
+def page_downloads(request, count, directory, kind):
+    downloads = run(request)
+    if not isinstance(downloads, list) or len(downloads) != count:
+        raise TeamsGraphError(f"Unexpected {kind} answer from the Teams page")
+    directory = directory.resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory, iter(downloads)
+
+
 def save_images(sources, directory):
     urls = [url for message_sources in sources.values() for url in message_sources]
     if not urls:
         return {}
-    downloads = run({"action": "images", "urls": urls})
-    if not isinstance(downloads, list) or len(downloads) != len(urls):
-        raise TeamsGraphError("Unexpected image answer from the Teams page")
-    directory = directory.resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    remaining = iter(downloads)
+    directory, remaining = page_downloads({"action": "images", "urls": urls}, len(urls), directory, "image")
     return {
         message_id: [saved_image(directory, f"{message_id}-{index}", next(remaining)) for index in range(1, len(message_sources) + 1)]
         for message_id, message_sources in sources.items()
     }
 
 
-def readable_messages(conversation, timezone=None, image_directory=None):
+def save_files(attachments, directory):
+    files = [{"driveId": attachment.get("driveId"), "itemId": attachment.get("itemId")}
+             for message_attachments in attachments.values() for attachment in message_attachments]
+    if not files:
+        return {}
+    directory, remaining = page_downloads({"action": "files", "files": files}, len(files), directory, "file")
+    return {
+        message_id: [saved_file(directory, message_id, attachment, next(remaining)) for attachment in message_attachments]
+        for message_id, message_attachments in attachments.items()
+    }
+
+
+def readable_messages(conversation, timezone=None, image_directory=None, file_directory=None):
     sources = {}
+    attachments = {}
     for message in conversation["messages"]:
         message["time"] = local_time(message.get("time"), timezone)
         if "html" in message:
@@ -270,11 +302,19 @@ def readable_messages(conversation, timezone=None, image_directory=None):
             message["text"] = renderer.text()
             if renderer.images:
                 sources[message["id"]] = renderer.images
+        if message.get("files"):
+            attachments[message["id"]] = message["files"]
+            message["files"] = [attachment["name"] for attachment in message["files"]]
     if image_directory:
         images = save_images(sources, image_directory)
         for message in conversation["messages"]:
             if message.get("id") in images:
                 message["images"] = images[message["id"]]
+    if file_directory:
+        files = save_files(attachments, file_directory)
+        for message in conversation["messages"]:
+            if message.get("id") in files:
+                message["files"] = files[message["id"]]
     return {"notice": UNTRUSTED_NOTICE, **conversation}
 
 
@@ -367,6 +407,7 @@ def main(argv=None):
     read.add_argument("--thread", metavar="MESSAGE_ID", help="read the replies of this channel post")
     read.add_argument("--limit", type=positive_integer, default=DEFAULT_MESSAGE_LIMIT)
     read.add_argument("--images", type=Path, metavar="DIR", help="save the images of the messages in DIR and list their files")
+    read.add_argument("--files", type=Path, metavar="DIR", help="save the files attached to the messages in DIR and list them")
     preview = commands.add_parser("preview", help="resolve and print a message and its approval code without posting it")
     send = commands.add_parser("send", help="post a previewed message once the user confirms it in the Teams dialog")
     for command in (preview, send):
@@ -398,7 +439,7 @@ def main(argv=None):
         elif args.command == "chats":
             result = readable_conversations(result)
         elif args.command == "read":
-            result = readable_messages(result, image_directory=args.images)
+            result = readable_messages(result, image_directory=args.images, file_directory=args.files)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (TeamsGraphError, OSError) as ex:
         print(f"teams_graph: {ex}", file=sys.stderr)

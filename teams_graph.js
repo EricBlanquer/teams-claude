@@ -13,6 +13,12 @@
         refreshScope: 'https://ic3.teams.office.com/.default openid profile offline_access',
         missingScopes: 'The refreshed Teams chat service token cannot read conversations',
     };
+    var FILES_RESOURCE = {
+        name: 'Graph files',
+        scopes: ['https://graph.microsoft.com/files.readwrite.all'],
+        refreshScope: GRAPH_RESOURCE.refreshScope,
+        missingScopes: 'The refreshed Graph token cannot read the attached files',
+    };
     var TOKEN_EXPIRY_MARGIN_SECONDS = 120;
     var REGION_DISCOVERY_SUFFIX = '.Discover.DISCOVER-REGION-GTM';
     var CONVERSATION_VIEW = 'msnp24Equivalent';
@@ -40,6 +46,9 @@
     var IMAGE_URL_PATTERN = /^https:\/\/[a-z0-9-]+\.asm\.skype\.com\/v1\/objects\/[\w-]+\/views\/\w+$/;
     var IMAGE_CONTENT_TYPE = /^image\/[\w.+-]+$/;
     var BASE64_CHUNK_SIZE = 0x8000;
+    var DRIVE_ID_PATTERN = /^b![\w-]+$/;
+    var DRIVE_ITEM_ID_PATTERN = /^[A-Za-z0-9]+$/;
+    var MAX_FILE_BYTES = 20 * 1024 * 1024;
     var CONFIRMATION_DIALOG_ID = 'teams-assistant-send-confirmation';
     var CONFIRMATION_TITLE_ID = CONFIRMATION_DIALOG_ID + '-title';
     var CONFIRMATION_DESTINATION_ID = CONFIRMATION_DIALOG_ID + '-destination';
@@ -379,9 +388,15 @@
                 return [];
             }
         }
-        return (Array.isArray(list) ? list : [])
-            .map(function(file) { return file && cleanName(file.fileName || file.title); })
-            .filter(Boolean);
+        return (Array.isArray(list) ? list : []).map(attachedFile).filter(Boolean);
+    }
+
+    function attachedFile(file) {
+        var name = file && cleanName(file.fileName || file.title);
+        if (!name) return null;
+        var driveId = file.sharepointIds && file.sharepointIds.driveId;
+        var itemId = file.fileInfo && file.fileInfo.itemId;
+        return driveId && itemId ? {name: name, driveId: String(driveId), itemId: String(itemId)} : {name: name};
     }
 
     function messageSummary(message) {
@@ -462,6 +477,35 @@
         if (!urls.length) return [];
         var token = await accessToken(CHAT_SERVICE_RESOURCE);
         return Promise.all(urls.map(function(url) { return downloadImage(token, url); }));
+    }
+
+    function fileTooLarge(size) {
+        return {error: 'Teams file is larger than ' + MAX_FILE_BYTES + ' bytes: ' + size};
+    }
+
+    async function downloadFile(token, file) {
+        var driveId = String((file && file.driveId) || '');
+        var itemId = String((file && file.itemId) || '');
+        if (!DRIVE_ID_PATTERN.test(driveId) || !DRIVE_ITEM_ID_PATTERN.test(itemId)) return {error: 'Not a OneDrive or SharePoint file'};
+        try {
+            var response = await fetch(GRAPH_URL + '/drives/' + encodeURIComponent(driveId) + '/items/' + encodeURIComponent(itemId) + '/content',
+                {headers: {Authorization: 'Bearer ' + token}});
+            if (!response.ok) return {error: 'Teams file download failed with HTTP ' + response.status};
+            var declaredSize = Number(response.headers.get('content-length'));
+            if (declaredSize > MAX_FILE_BYTES) return fileTooLarge(declaredSize);
+            var bytes = new Uint8Array(await response.arrayBuffer());
+            if (bytes.length > MAX_FILE_BYTES) return fileTooLarge(bytes.length);
+            return {data: base64(bytes)};
+        } catch (ex) {
+            return {error: 'Teams file download failed: ' + (ex && ex.message ? ex.message : String(ex))};
+        }
+    }
+
+    async function downloadFiles(request) {
+        var files = Array.isArray(request.files) ? request.files : [];
+        if (!files.length) return [];
+        var token = await accessToken(FILES_RESOURCE);
+        return Promise.all(files.map(function(file) { return downloadFile(token, file); }));
     }
 
     function escapeRegExp(text) {
@@ -888,6 +932,7 @@
             if (request.action === 'chats') return {ok: true, result: await listConversations(request)};
             if (request.action === 'read') return {ok: true, result: await readMessages(request)};
             if (request.action === 'images') return {ok: true, result: await downloadImages(request)};
+            if (request.action === 'files') return {ok: true, result: await downloadFiles(request)};
             if (request.action === 'preview') return {ok: true, result: await previewMessage(request)};
             if (request.action === 'send') return {ok: true, result: await sendMessage(request)};
             throw new Error('Unknown action: ' + request.action);
