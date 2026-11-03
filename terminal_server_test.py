@@ -124,9 +124,9 @@ class TerminalServerTest(unittest.TestCase):
                         "initialCommand": "printf 'PID:%s\\n' \"$$\"; exec sleep 60",
                     }))
                     output = ""
-                    while "\r\n" not in output:
+                    while "\r\n" not in output.partition("PID:")[2]:
                         output += json.loads(await asyncio.wait_for(websocket.recv(), 5))["data"]
-                    child = int(output.split("PID:", 1)[1].split("\r\n", 1)[0])
+                    child = int(output.partition("PID:")[2].split("\r\n", 1)[0])
                     process.terminate()
                     await asyncio.wait_for(websocket.wait_closed(), 5)
                     return child
