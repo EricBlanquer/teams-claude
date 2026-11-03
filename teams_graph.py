@@ -58,6 +58,7 @@ IMAGE_PLACEHOLDER = "[image]"
 IMAGE_FALLBACK_EXTENSION = ".img"
 UNSAFE_FILE_NAME_CHARACTERS = re.compile(r"[^\w-]")
 UNSAFE_ATTACHMENT_NAME_CHARACTERS = re.compile(r"[^\w.-]")
+ATTACHMENT_KEYS = ("driveId", "itemId", "authorId")
 QUOTE_MARKER = "> "
 QUOTE_ONLY_LINE = re.compile(r"[> ]+")
 TIME_FORMAT = "%Y-%m-%d %H:%M"
@@ -281,7 +282,7 @@ def save_images(sources, directory):
 
 
 def save_files(attachments, directory):
-    files = [{"driveId": attachment.get("driveId"), "itemId": attachment.get("itemId")}
+    files = [{key: attachment.get(key) for key in ATTACHMENT_KEYS}
              for message_attachments in attachments.values() for attachment in message_attachments]
     if not files:
         return {}

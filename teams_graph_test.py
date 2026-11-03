@@ -243,8 +243,8 @@ class ReadableOutputTest(unittest.TestCase):
     def test_saves_the_attached_files_of_each_message(self):
         conversation = {"messages": [
             {"id": "1", "time": None, "text": "a", "files": [
-                {"name": "ICP-1_labqa.log", "driveId": "b!d", "itemId": "I1"},
-                {"name": "../secret report.txt", "driveId": "b!d", "itemId": "I2"},
+                {"name": "ICP-1_labqa.log", "driveId": "b!d", "itemId": "I1", "authorId": "a1"},
+                {"name": "../secret report.txt", "driveId": "b!d", "itemId": "I2", "authorId": "a1"},
             ]},
             {"id": "2", "time": None, "text": "no file"},
             {"id": "../3", "time": None, "text": "c", "files": [{"name": "c.txt"}]},
@@ -254,7 +254,8 @@ class ReadableOutputTest(unittest.TestCase):
             directory = Path(root) / "files"
             result = teams_graph.readable_messages(conversation, file_directory=directory)
             run.assert_called_once_with({"action": "files", "files": [
-                {"driveId": "b!d", "itemId": "I1"}, {"driveId": "b!d", "itemId": "I2"}, {"driveId": None, "itemId": None},
+                {"driveId": "b!d", "itemId": "I1", "authorId": "a1"}, {"driveId": "b!d", "itemId": "I2", "authorId": "a1"},
+                {"driveId": None, "itemId": None, "authorId": None},
             ]})
             self.assertEqual([message.get("files") for message in result["messages"]], [
                 [
@@ -417,7 +418,7 @@ class MainTest(unittest.TestCase):
         })
 
     def test_reads_messages_with_their_attached_files(self):
-        answer = {"messages": [{"id": "1", "time": None, "text": "logs", "files": [{"name": "run.log", "driveId": "b!d", "itemId": "I1"}]}]}
+        answer = {"messages": [{"id": "1", "time": None, "text": "logs", "files": [{"name": "run.log", "driveId": "b!d", "itemId": "I1", "authorId": "a1"}]}]}
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as root, \
                 mock.patch.object(teams_graph, "run", side_effect=[answer, [{"data": "aGk="}]]) as run, \
@@ -425,7 +426,7 @@ class MainTest(unittest.TestCase):
             self.assertEqual(teams_graph.main(["read", "48:notes", "--files", root]), 0)
             self.assertEqual(run.call_args_list, [
                 mock.call({"action": "read", "conversationId": "48:notes", "threadId": None, "limit": 30}),
-                mock.call({"action": "files", "files": [{"driveId": "b!d", "itemId": "I1"}]}),
+                mock.call({"action": "files", "files": [{"driveId": "b!d", "itemId": "I1", "authorId": "a1"}]}),
             ])
             saved = Path(root).resolve() / "1-run.log"
             self.assertEqual(json.loads(stdout.getvalue())["messages"], [

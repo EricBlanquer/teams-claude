@@ -48,6 +48,8 @@
     var BASE64_CHUNK_SIZE = 0x8000;
     var DRIVE_ID_PATTERN = /^b![\w-]+$/;
     var DRIVE_ITEM_ID_PATTERN = /^[A-Za-z0-9]+$/;
+    var AUTHOR_ID_PATTERN = /\/contacts\/8:orgid:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+    var FILE_METADATA = '?$select=size,createdBy';
     var MAX_FILE_BYTES = 20 * 1024 * 1024;
     var CONFIRMATION_DIALOG_ID = 'teams-assistant-send-confirmation';
     var CONFIRMATION_TITLE_ID = CONFIRMATION_DIALOG_ID + '-title';
@@ -388,15 +390,22 @@
                 return [];
             }
         }
-        return (Array.isArray(list) ? list : []).map(attachedFile).filter(Boolean);
+        return Array.isArray(list) ? list : [];
     }
 
-    function attachedFile(file) {
+    function authorId(message) {
+        var match = AUTHOR_ID_PATTERN.exec(String(message.from || ''));
+        return match ? match[1].toLowerCase() : null;
+    }
+
+    function attachedFile(file, author) {
         var name = file && cleanName(file.fileName || file.title);
         if (!name) return null;
         var driveId = file.sharepointIds && file.sharepointIds.driveId;
         var itemId = file.fileInfo && file.fileInfo.itemId;
-        return driveId && itemId ? {name: name, driveId: String(driveId), itemId: String(itemId)} : {name: name};
+        return driveId && itemId && author
+            ? {name: name, driveId: String(driveId), itemId: String(itemId), authorId: author}
+            : {name: name};
     }
 
     function messageSummary(message) {
@@ -414,7 +423,10 @@
         }
         if (properties.edittime) summary.edited = true;
         summary[message.messagetype === PLAIN_TEXT_MESSAGE_TYPE ? 'text' : 'html'] = message.content || '';
-        var files = attachedFiles(properties.files);
+        var author = authorId(message);
+        var files = attachedFiles(properties.files)
+            .map(function(file) { return attachedFile(file, author); })
+            .filter(Boolean);
         if (files.length) summary.files = files;
         return summary;
     }
@@ -479,23 +491,47 @@
         return Promise.all(urls.map(function(url) { return downloadImage(token, url); }));
     }
 
-    function fileTooLarge(size) {
-        return {error: 'Teams file is larger than ' + MAX_FILE_BYTES + ' bytes: ' + size};
+    function fileTooLarge() {
+        return {error: 'Teams file is larger than ' + MAX_FILE_BYTES + ' bytes'};
+    }
+
+    async function cappedContent(response) {
+        var reader = response.body.getReader();
+        var chunks = [];
+        var total = 0;
+        var chunk = await reader.read();
+        while (!chunk.done) {
+            total += chunk.value.length;
+            if (total > MAX_FILE_BYTES) {
+                await reader.cancel();
+                return null;
+            }
+            chunks.push(chunk.value);
+            chunk = await reader.read();
+        }
+        var bytes = new Uint8Array(total);
+        chunks.reduce(function(offset, value) {
+            bytes.set(value, offset);
+            return offset + value.length;
+        }, 0);
+        return bytes;
     }
 
     async function downloadFile(token, file) {
         var driveId = String((file && file.driveId) || '');
         var itemId = String((file && file.itemId) || '');
-        if (!DRIVE_ID_PATTERN.test(driveId) || !DRIVE_ITEM_ID_PATTERN.test(itemId)) return {error: 'Not a OneDrive or SharePoint file'};
+        var author = String((file && file.authorId) || '').toLowerCase();
+        if (!DRIVE_ID_PATTERN.test(driveId) || !DRIVE_ITEM_ID_PATTERN.test(itemId) || !author) return {error: 'Not a OneDrive or SharePoint file'};
+        var itemUrl = GRAPH_URL + '/drives/' + encodeURIComponent(driveId) + '/items/' + encodeURIComponent(itemId);
         try {
-            var response = await fetch(GRAPH_URL + '/drives/' + encodeURIComponent(driveId) + '/items/' + encodeURIComponent(itemId) + '/content',
-                {headers: {Authorization: 'Bearer ' + token}});
+            var metadata = await graphRequest(token, 'GET', itemUrl + FILE_METADATA);
+            var creator = metadata.createdBy && metadata.createdBy.user && metadata.createdBy.user.id;
+            if (String(creator || '').toLowerCase() !== author) return {error: 'Teams file was not created by the author of the message'};
+            if (Number(metadata.size) > MAX_FILE_BYTES) return fileTooLarge();
+            var response = await fetch(itemUrl + '/content', {headers: {Authorization: 'Bearer ' + token}});
             if (!response.ok) return {error: 'Teams file download failed with HTTP ' + response.status};
-            var declaredSize = Number(response.headers.get('content-length'));
-            if (declaredSize > MAX_FILE_BYTES) return fileTooLarge(declaredSize);
-            var bytes = new Uint8Array(await response.arrayBuffer());
-            if (bytes.length > MAX_FILE_BYTES) return fileTooLarge(bytes.length);
-            return {data: base64(bytes)};
+            var bytes = await cappedContent(response);
+            return bytes ? {data: base64(bytes)} : fileTooLarge();
         } catch (ex) {
             return {error: 'Teams file download failed: ' + (ex && ex.message ? ex.message : String(ex))};
         }
@@ -505,7 +541,11 @@
         var files = Array.isArray(request.files) ? request.files : [];
         if (!files.length) return [];
         var token = await accessToken(FILES_RESOURCE);
-        return Promise.all(files.map(function(file) { return downloadFile(token, file); }));
+        var downloads = [];
+        for (var index = 0; index < files.length; index++) {
+            downloads.push(await downloadFile(token, files[index]));
+        }
+        return downloads;
     }
 
     function escapeRegExp(text) {
