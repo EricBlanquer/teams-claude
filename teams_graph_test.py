@@ -143,9 +143,18 @@ class HtmlToTextTest(unittest.TestCase):
             '<p>ligne   1<br>\nligne 2 &lt;id&gt; &amp; é</p>'
         )
         self.assertEqual(teams_graph.html_to_text(content), "\n".join([
-            "Bonjour @Marie,", "", "- un", "- deux gras", "  - sous", "", "1. a", "2. b", "", "A | B", "1 | 2", "",
-            "x = 1", "  y = 2", "", "> citation", "", "ligne 1", "ligne 2 <id> & é",
+            "Bonjour @Marie,", "- un", "- deux gras", "  - sous", "1. a", "2. b", "A | B", "1 | 2",
+            "x = 1", "  y = 2", "> citation", "ligne 1", "ligne 2 <id> & é",
         ]))
+
+    def test_shows_a_blank_line_only_where_teams_does(self):
+        self.assertEqual(teams_graph.html_to_text("<p>a</p>\r\n<p>b</p>"), "a\nb")
+        self.assertEqual(teams_graph.html_to_text("<p>a</p>\r\n<p>&nbsp;</p>\r\n<p>b</p>"), "a\n\nb")
+        self.assertEqual(teams_graph.html_to_text("<p>a</p><p>&nbsp;</p><p>&nbsp;</p><p>b</p>"), "a\n\n\nb")
+        self.assertEqual(teams_graph.html_to_text("<p>a<br></p><p>b</p>"), "a\nb")
+        self.assertEqual(teams_graph.html_to_text("<p>a</p><p><br>\r\nb</p>"), "a\n\nb")
+        self.assertEqual(teams_graph.html_to_text("<p>a</p><p> </p><p>b</p>"), "a\nb")
+        self.assertEqual(teams_graph.html_to_text("<div>a</div><div>b</div>"), "a\nb")
 
     def test_keeps_plain_text_messages(self):
         self.assertEqual(teams_graph.html_to_text("a &lt; b<br>second"), "a < b\nsecond")
@@ -159,7 +168,7 @@ class HtmlToTextTest(unittest.TestCase):
             '<img itemtype="http://schema.skype.com/Emoji" src="y"></p>'
             '<p><img itemtype="http://schema.skype.com/AMSImage" alt="image" src="z"></p>'
         )
-        self.assertEqual(teams_graph.html_to_text(content), "@Marie Boudet et @Paul, 🙂\n\n[image]")
+        self.assertEqual(teams_graph.html_to_text(content), "@Marie Boudet et @Paul, 🙂\n[image]")
 
     def test_collects_the_sources_of_shown_images_only(self):
         content = (
@@ -167,14 +176,14 @@ class HtmlToTextTest(unittest.TestCase):
             '<p><img itemtype="http://schema.skype.com/AMSImage" src="first"><img alt="no source"></p>'
         )
         renderer = teams_graph.rendered_html(content)
-        self.assertEqual((renderer.text(), renderer.images), ("🙂\n\n[image][image]", ["first", ""]))
+        self.assertEqual((renderer.text(), renderer.images), ("🙂\n[image][image]", ["first", ""]))
 
     def test_prefixes_every_quoted_line(self):
         content = (
             '<blockquote itemtype="http://schema.skype.com/Reply"><strong>Anton</strong><span></span>'
             '<p>first<br>second</p></blockquote><p>answer</p>'
         )
-        self.assertEqual(teams_graph.html_to_text(content), "> Anton\n> first\n> second\n\nanswer")
+        self.assertEqual(teams_graph.html_to_text(content), "> Anton\n> first\n> second\nanswer")
 
 
 class ReadableOutputTest(unittest.TestCase):

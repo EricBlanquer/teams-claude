@@ -81,11 +81,16 @@
     var PREVIEW_POLICY = "default-src 'none'; style-src 'unsafe-inline'";
     var PREVIEW_STYLES = 'html{height:100%}html:focus-within{outline:2px solid #5b5fc7;outline-offset:-2px}' +
         'body{box-sizing:border-box;min-height:100%;margin:0;padding:12px;background:#ffffff;color:#242424;' +
-        'font:14px/1.45 "Segoe UI",system-ui,sans-serif;overflow-wrap:anywhere}body:focus{outline:none}' +
+        'font:14px/1.4286 "Segoe UI",system-ui,sans-serif;overflow-wrap:anywhere}body:focus{outline:none}' +
+        'p,div,ul,ol,li,table{margin-top:0;margin-bottom:0}ul,ol{padding-left:26px}' +
+        'h1,h2,h3{margin-top:3px;margin-bottom:3px}h4{margin-top:1px;margin-bottom:1px}' +
+        'h1{font-size:18px;font-weight:300}h2{font-size:14px;font-weight:700}h3{font-size:12px;font-weight:700}' +
+        'h4{font-size:12px;font-weight:600}hr{margin-top:10px;margin-bottom:10px}' +
         'table{border-collapse:collapse}td,th{border:1px solid #c8c6c4;padding:4px 8px}' +
         'pre,code,codeblock{font-family:Consolas,"Courier New",monospace}' +
-        'pre,codeblock{display:block;white-space:pre-wrap;background:#f5f5f5;padding:8px}' +
-        'blockquote{margin:0;padding-left:12px;border-left:3px solid #c8c6c4}at{font-weight:600;color:#4f52b2}';
+        'pre,codeblock{display:block;white-space:pre-wrap;background:#f5f5f5;margin-top:10px;margin-bottom:10px;padding:4px 14px}' +
+        'blockquote{margin-top:7px;margin-bottom:7px;margin-left:0;margin-right:0;padding:7px 0 7px 15px;' +
+        'border-left:1px solid #c8c6c4}at{font-weight:600;color:#4f52b2}';
 
     function storageEntries() {
         var entries = [];

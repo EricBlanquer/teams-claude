@@ -837,6 +837,39 @@ test('asks the user in Teams before posting and restores the focus', async () =>
     assert.deepEqual(env.revoked, ['blob:preview-1']);
 });
 
+function previewRules(env) {
+    const rules = {};
+    const css = env.blobs[0].content.match(/<style>(.*)<\/style>/)[1];
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+        for (const selector of selectors.split(',')) {
+            const declarations = rules[selector.trim()] ??= {};
+            for (const declaration of body.split(';').filter(Boolean)) {
+                const separator = declaration.indexOf(':');
+                declarations[declaration.slice(0, separator).trim()] = declaration.slice(separator + 1).trim();
+            }
+        }
+    }
+    return rules;
+}
+
+test('spaces the preview blocks as Teams renders them', async () => {
+    const teamsSpacing = {
+        p: '0', div: '0', ul: '0', ol: '0', li: '0', table: '0',
+        blockquote: '7px', h1: '3px', h2: '3px', h3: '3px', h4: '1px', pre: '10px', hr: '10px',
+    };
+    const env = environment({routes: {[CHAT_MESSAGES]: jsonResponse(201, {id: '42'})}});
+    const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: '<p>a</p><p>b</p>'}, current => {
+        const rules = previewRules(current);
+        for (const [tag, margin] of Object.entries(teamsSpacing)) {
+            assert.deepEqual([rules[tag]?.['margin-top'], rules[tag]?.['margin-bottom']], [margin, margin], tag);
+        }
+        assert.equal(rules['ul']['padding-left'], '26px');
+        assert.equal(rules['ol']['padding-left'], '26px');
+        confirmInTeams(current);
+    });
+    assert.equal(outcome.ok, true, outcome.error);
+});
+
 test('ignores scripted clicks and cancels on Escape', async () => {
     const env = environment();
     const outcome = await approvedSend(env, {conversationId: CHAT_ID, html: 'hi'}, current => {

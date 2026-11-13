@@ -61,6 +61,7 @@ UNSAFE_ATTACHMENT_NAME_CHARACTERS = re.compile(r"[^\w.-]")
 ATTACHMENT_KEYS = ("driveId", "itemId", "authorId")
 QUOTE_MARKER = "> "
 QUOTE_ONLY_LINE = re.compile(r"[> ]+")
+COLLAPSIBLE_WHITESPACE = " \t\n\r\f"
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 DEFAULT_CONVERSATION_LIMIT = 20
 DEFAULT_MESSAGE_LIMIT = 30
@@ -135,10 +136,25 @@ def message_html(content, plain_text):
     return content
 
 
+class TextLine:
+    def __init__(self, quotes, marker=""):
+        self.quotes = quotes
+        self.marker = marker
+        self.text = ""
+        self.visible = False
+
+    def is_blank(self):
+        return not (self.text or self.visible or self.marker)
+
+    def render(self):
+        line = (QUOTE_MARKER * self.quotes + self.marker + self.text).rstrip()
+        return "" if QUOTE_ONLY_LINE.fullmatch(line) else line
+
+
 class TextRenderer(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.parts = []
+        self.lines = [TextLine(0)]
         self.lists = []
         self.preformatted = 0
         self.cells = 0
@@ -146,16 +162,38 @@ class TextRenderer(HTMLParser):
         self.mention = None
         self.images = []
 
-    def newline(self, text=""):
-        self.parts.append("\n" + QUOTE_MARKER * self.quotes + text)
+    @property
+    def line(self):
+        return self.lines[-1]
+
+    def new_line(self, marker=""):
+        self.lines.append(TextLine(self.quotes, marker))
+
+    def end_line(self):
+        if self.line.text or self.line.visible:
+            self.new_line()
+
+    def take_quote_depth(self):
+        if self.line.is_blank():
+            self.line.quotes = self.quotes
+
+    def append(self, text):
+        if text:
+            self.line.text += text
+            self.line.visible = True
 
     def write(self, text):
-        if not self.preformatted:
-            text = re.sub(r"\s+", " ", text)
-            if not self.parts or self.parts[-1].endswith(("\n", QUOTE_MARKER)):
-                text = text.lstrip(" ")
-        if text:
-            self.parts.append(text)
+        if self.preformatted:
+            first, *others = text.split("\n")
+            self.append(first)
+            for other in others:
+                self.new_line()
+                self.append(other)
+            return
+        if text.strip(COLLAPSIBLE_WHITESPACE):
+            self.line.visible = True
+        text = re.sub(r"\s+", " ", text)
+        self.line.text += text if self.line.text else text.lstrip(" ")
 
     def starts_line(self, tag):
         return tag in BLOCK_TAGS and not (tag in LIST_TAGS and self.lists)
@@ -164,7 +202,7 @@ class TextRenderer(HTMLParser):
         attributes = dict(attrs)
         itemtype = attributes.get("itemtype") or ""
         if self.starts_line(tag):
-            self.newline()
+            self.end_line()
         if tag in PREFORMATTED_TAGS:
             self.preformatted += 1
         if tag in LIST_TAGS:
@@ -174,30 +212,32 @@ class TextRenderer(HTMLParser):
                 self.lists.append(["ul", 0])
             self.lists[-1][1] += 1
             marker = "- " if self.lists[-1][0] == "ul" else f"{self.lists[-1][1]}. "
-            self.newline("  " * (len(self.lists) - 1) + marker)
+            if not self.line.is_blank():
+                self.new_line()
+            self.line.quotes = self.quotes
+            self.line.marker = "  " * (len(self.lists) - 1) + marker
         elif tag == "br":
-            self.newline()
+            self.new_line()
         elif tag == "tr":
-            self.newline()
+            self.end_line()
             self.cells = 0
         elif tag in CELL_TAGS:
             if self.cells:
-                self.parts[-1] = self.parts[-1].rstrip(" ")
-                self.parts.append(" | ")
+                self.line.text = self.line.text.rstrip(" ") + " | "
             self.cells += 1
         elif tag == "blockquote":
             self.quotes += 1
-            self.parts.append(QUOTE_MARKER)
+            self.take_quote_depth()
         elif tag == "at":
-            self.parts.append("@")
+            self.append("@")
         elif tag == "span" and MENTION_ITEMTYPE in itemtype and attributes.get("itemid") != self.mention:
             self.mention = attributes.get("itemid")
-            self.parts.append("@")
+            self.append("@")
         elif tag == "img" and EMOJI_ITEMTYPE in itemtype:
-            self.write(attributes.get("alt") or "")
+            self.append(attributes.get("alt") or "")
         elif tag == "img":
             self.images.append(attributes.get("src") or "")
-            self.write(IMAGE_PLACEHOLDER)
+            self.append(IMAGE_PLACEHOLDER)
 
     def handle_endtag(self, tag):
         if tag in LIST_TAGS and self.lists:
@@ -205,7 +245,9 @@ class TextRenderer(HTMLParser):
         if tag == "blockquote":
             self.quotes = max(self.quotes - 1, 0)
         if self.starts_line(tag):
-            self.newline()
+            self.end_line()
+        if tag == "blockquote":
+            self.take_quote_depth()
         if tag in PREFORMATTED_TAGS:
             self.preformatted = max(self.preformatted - 1, 0)
 
@@ -213,8 +255,7 @@ class TextRenderer(HTMLParser):
         self.write(data)
 
     def text(self):
-        lines = ["" if QUOTE_ONLY_LINE.fullmatch(line) else line.rstrip() for line in "".join(self.parts).split("\n")]
-        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip("\n")
+        return "\n".join(line.render() for line in self.lines).strip("\n")
 
 
 def rendered_html(content):
