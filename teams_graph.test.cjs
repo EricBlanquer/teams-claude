@@ -1234,6 +1234,25 @@ test('summarizes message details', async () => {
     ]);
 });
 
+test('flags the messages of the signed-in user only when the cached account is unambiguous', async () => {
+    const from = id => `${CHAT_SERVICE}/v1/users/ME/contacts/8:orgid:${id}`;
+    const routes = {
+        [`GET ${messagesUrl(CHAT_ID)}`]: jsonResponse(200, {
+            messages: [message('3', {from: from('8a7c6d2e-1f0b-4c3d-9e8f-7a6b5c4d3e2f')}), message('2', {from: from(AUTHOR_ID.toUpperCase())}), message('1')],
+        }),
+    };
+    const account = `${AUTHOR_ID}.tenant-id`;
+    const credentials = [accessToken('graph-token', NOW_SECONDS + 3600, SEND_SCOPES, account), accessToken('chat-token', NOW_SECONDS + 3600, CHAT_SCOPES, account)];
+    const mine = await environment({credentials, routes}).teamsGraph({action: 'read', conversationId: CHAT_ID});
+    assert.equal(mine.ok, true, mine.error);
+    assert.deepEqual(plain(mine.result.messages).map(item => [item.id, item.fromMe]), [['1', undefined], ['2', true], ['3', undefined]]);
+    const otherAccount = accessToken('other-token', NOW_SECONDS + 3600, 'openid https://other.example/.default', 'other.tenant-id');
+    const ambiguous = await environment({credentials: [...credentials, otherAccount], routes})
+        .teamsGraph({action: 'read', conversationId: CHAT_ID});
+    assert.equal(ambiguous.ok, true, ambiguous.error);
+    assert.equal(plain(ambiguous.result.messages).some(item => item.fromMe), false);
+});
+
 test('reads the replies of a channel post', async () => {
     const thread = `${CHANNEL_ID};messageid=100`;
     const env = environment({

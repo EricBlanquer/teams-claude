@@ -485,5 +485,114 @@ class MainTest(unittest.TestCase):
         run.assert_not_called()
 
 
+def message(message_id, text="", **extra):
+    return {"id": message_id, "time": None, "author": "Alice", "text": text, **extra}
+
+
+class WatchEventsTest(unittest.TestCase):
+    def test_reports_nothing_on_the_first_read_without_a_starting_message(self):
+        known = {}
+        self.assertEqual(teams_graph.watch_events(known, [message("1", "a"), message("2", "b")], None), [])
+        self.assertEqual(set(known), {"1", "2"})
+
+    def test_reports_the_messages_posted_after_the_starting_message(self):
+        events = teams_graph.watch_events({}, [message("1", "a"), message("2", "b"), message("3", "", deleted=True)], "1")
+        self.assertEqual(events, [{"event": "new", **message("2", "b")}])
+
+    def test_reports_new_edited_and_deleted_messages_of_other_people(self):
+        known = {}
+        teams_graph.watch_events(known, [message("1", "a"), message("2", "b"), message("3", "c")], None)
+        events = teams_graph.watch_events(known, [
+            message("1", "a"), message("2", "b2", edited=True), message("3", "", deleted=True), message("4", "d", files=["x.log"]),
+        ], "3")
+        self.assertEqual([event["event"] for event in events], ["edited", "deleted", "new"])
+        self.assertEqual(events[0]["text"], "b2")
+        self.assertEqual(events[2]["files"], ["x.log"])
+
+    def test_reports_a_changed_attachment_list(self):
+        known = {}
+        teams_graph.watch_events(known, [message("1", "a")], None)
+        self.assertEqual(teams_graph.watch_events(known, [message("1", "a", files=["x.log"])], "1")[0]["event"], "edited")
+
+    def test_ignores_the_messages_of_the_signed_in_user(self):
+        known = {}
+        teams_graph.watch_events(known, [message("1", "a", fromMe=True)], None)
+        events = teams_graph.watch_events(known, [message("1", "a2", fromMe=True), message("2", "b", fromMe=True)], "1")
+        self.assertEqual(events, [])
+
+    def test_keeps_the_newest_message_id(self):
+        self.assertEqual(teams_graph.newest_message_id([message("9"), message("10")], None), "10")
+        self.assertEqual(teams_graph.newest_message_id([], "5"), "5")
+        self.assertEqual(teams_graph.newest_message_id([message("3")], "5"), "5")
+        self.assertIsNone(teams_graph.newest_message_id([], None))
+
+
+class WatchCommandTest(unittest.TestCase):
+    def watch(self, argv, answers, reads):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == reads:
+                raise KeyboardInterrupt
+
+        with mock.patch.object(teams_graph, "run", side_effect=answers) as run, \
+                mock.patch.object(teams_graph.time, "sleep", side_effect=sleep), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = teams_graph.main(argv)
+        return code, [json.loads(line) for line in stdout.getvalue().splitlines()], stderr.getvalue(), run, sleeps
+
+    def conversation(self, *messages):
+        return {"kind": "chat", "conversationId": "19:a@thread.v2", "title": "Projet", "messages": [dict(item) for item in messages]}
+
+    def test_prints_one_line_per_change_until_interrupted(self):
+        first = self.conversation(message("1", "a"), message("2", "b"))
+        second = self.conversation(message("1", "a"), message("2", "b"), message("3", "c"))
+        third = self.conversation(message("2", "b2", edited=True), message("3", "c"), message("4", "d", fromMe=True))
+        code, events, _, run, sleeps = self.watch(["watch", "19:a@thread.v2", "--interval", "5"], [first, second, third], 3)
+        self.assertEqual(code, 0)
+        self.assertEqual(events[0], {
+            "event": "watching", "kind": "chat", "conversationId": "19:a@thread.v2", "title": "Projet", "threadId": None,
+            "notice": teams_graph.UNTRUSTED_NOTICE,
+        })
+        self.assertEqual([(event["event"], event["id"]) for event in events[1:]], [("new", "3"), ("edited", "2")])
+        self.assertEqual(run.call_args.args[0], {
+            "action": "read", "conversationId": "19:a@thread.v2", "threadId": None, "limit": teams_graph.WATCH_MESSAGE_LIMIT,
+        })
+        self.assertEqual(sleeps, [5, 5, 5])
+
+    def test_reports_the_replies_posted_after_the_starting_message(self):
+        answer = self.conversation(message("1", "a"), message("2", "b"))
+        code, events, _, run, _ = self.watch(["watch", "19:c@thread.tacv2", "--thread", "1", "--after", "1"], [answer], 1)
+        self.assertEqual(code, 0)
+        self.assertEqual([(event["event"], event.get("id")) for event in events], [("watching", None), ("new", "2")])
+        self.assertEqual(run.call_args.args[0]["threadId"], "1")
+
+    def test_reports_a_failure_once_and_the_recovery(self):
+        answers = [
+            self.conversation(message("1", "a")), teams_graph.TeamsGraphError("Teams did not answer"), OSError("reset"),
+            self.conversation(message("1", "a"), message("2", "b")),
+        ]
+        code, events, _, _, _ = self.watch(["watch", "19:a@thread.v2"], answers, 4)
+        self.assertEqual(code, 0)
+        self.assertEqual([event["event"] for event in events], ["watching", "error", "recovered", "new"])
+        self.assertEqual(events[1]["error"], "Teams did not answer")
+
+    def test_stops_when_the_conversation_cannot_be_read_at_start(self):
+        code, events, stderr, _, sleeps = self.watch(["watch", "19:a@thread.v2"], [teams_graph.TeamsGraphError("Unknown conversation")], 1)
+        self.assertEqual((code, events, sleeps), (1, [], []))
+        self.assertEqual(stderr, "teams_graph: Unknown conversation\n")
+
+    def test_rejects_an_invalid_starting_message(self):
+        stderr = io.StringIO()
+        with mock.patch.object(teams_graph, "run") as run, contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as raised:
+            teams_graph.main(["watch", "48:notes", "--after", "abc"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--after", stderr.getvalue())
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

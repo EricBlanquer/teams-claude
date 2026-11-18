@@ -145,10 +145,19 @@
         return payload.access_token;
     }
 
+    function cachedAccounts(credentials) {
+        return new Set(credentials.map(function(credential) { return credential.homeAccountId; }));
+    }
+
+    function signedInUserId() {
+        var accounts = Array.from(cachedAccounts(cachedCredentials('AccessToken').concat(cachedCredentials('RefreshToken'))));
+        return accounts.length === 1 ? String(accounts[0] || '').split('.')[0].toLowerCase() || null : null;
+    }
+
     async function accessToken(resource) {
         var accessTokens = cachedCredentials('AccessToken').filter(function(token) { return hasScopes(token.target, resource.scopes); });
         var refreshTokens = cachedCredentials('RefreshToken');
-        var accounts = new Set(accessTokens.concat(refreshTokens).map(function(credential) { return credential.homeAccountId; }));
+        var accounts = cachedAccounts(accessTokens.concat(refreshTokens));
         if (accounts.size > 1) throw new Error('Several Teams accounts are cached, the ' + resource.name + ' identity is ambiguous');
         var now = Date.now() / 1000;
         var validTokens = accessTokens
@@ -413,13 +422,15 @@
             : {name: name};
     }
 
-    function messageSummary(message) {
+    function messageSummary(message, me) {
         var properties = message.properties || {};
+        var author = authorId(message);
         var summary = {
             id: message.id,
             time: isoTime(message.composetime) || isoTime(message.originalarrivaltime),
             author: cleanName(message.imdisplayname || message.fromDisplayNameInToken) || null,
         };
+        if (me && author === me) summary.fromMe = true;
         if (message.rootMessageId && message.rootMessageId !== message.id) summary.replyTo = message.rootMessageId;
         if (cleanName(properties.subject)) summary.subject = cleanName(properties.subject);
         if (properties.deletetime) {
@@ -428,7 +439,6 @@
         }
         if (properties.edittime) summary.edited = true;
         summary[message.messagetype === PLAIN_TEXT_MESSAGE_TYPE ? 'text' : 'html'] = message.content || '';
-        var author = authorId(message);
         var files = attachedFiles(properties.files)
             .map(function(file) { return attachedFile(file, author); })
             .filter(Boolean);
@@ -452,6 +462,7 @@
         var thread = request.threadId ? target.conversationId + ';messageid=' + request.threadId : target.conversationId;
         var next = conversationPath(thread) + '/messages?view=' + encodeURIComponent(MESSAGE_VIEW) +
             '&pageSize=' + Math.min(limit, MESSAGE_PAGE_SIZE) + '&startTime=1';
+        var me = signedInUserId();
         var messages = [];
         var oldestVersion = Infinity;
         while (next && !hasLatestMessages(messages, limit, oldestVersion)) {
@@ -464,7 +475,7 @@
         }
         return Object.assign(publicTarget(target), {
             threadId: request.threadId || undefined,
-            messages: messages.sort(creationOrder).slice(0, limit).reverse().map(messageSummary),
+            messages: messages.sort(creationOrder).slice(0, limit).reverse().map(function(message) { return messageSummary(message, me); }),
         });
     }
 
