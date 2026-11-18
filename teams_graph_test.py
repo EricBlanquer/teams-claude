@@ -569,15 +569,25 @@ class WatchCommandTest(unittest.TestCase):
         self.assertEqual([(event["event"], event.get("id")) for event in events], [("watching", None), ("new", "2")])
         self.assertEqual(run.call_args.args[0]["threadId"], "1")
 
-    def test_reports_a_failure_once_and_the_recovery(self):
+    def test_reports_lasting_failures_once_and_the_recovery(self):
         answers = [
-            self.conversation(message("1", "a")), teams_graph.TeamsGraphError("Teams did not answer"), OSError("reset"),
+            self.conversation(message("1", "a")), OSError("reset"), OSError("reset"),
+            teams_graph.TeamsGraphError("Teams did not answer"), OSError("reset"),
             self.conversation(message("1", "a"), message("2", "b")),
         ]
-        code, events, _, _, _ = self.watch(["watch", "19:a@thread.v2"], answers, 4)
+        code, events, _, _, _ = self.watch(["watch", "19:a@thread.v2"], answers, 6)
         self.assertEqual(code, 0)
         self.assertEqual([event["event"] for event in events], ["watching", "error", "recovered", "new"])
         self.assertEqual(events[1]["error"], "Teams did not answer")
+
+    def test_keeps_quiet_on_failures_that_do_not_last(self):
+        answers = [
+            self.conversation(message("1", "a")), OSError("reset"), OSError("reset"), self.conversation(message("1", "a")),
+            OSError("reset"), self.conversation(message("1", "a"), message("2", "b")),
+        ]
+        code, events, _, _, _ = self.watch(["watch", "19:a@thread.v2"], answers, 6)
+        self.assertEqual(code, 0)
+        self.assertEqual([event["event"] for event in events], ["watching", "new"])
 
     def test_stops_when_the_conversation_cannot_be_read_at_start(self):
         code, events, stderr, _, sleeps = self.watch(["watch", "19:a@thread.v2"], [teams_graph.TeamsGraphError("Unknown conversation")], 1)
