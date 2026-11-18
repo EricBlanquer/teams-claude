@@ -345,6 +345,41 @@ class RunTest(unittest.TestCase):
             teams_graph.run({"action": "current"}, url)
 
 
+class ReadTargetTest(unittest.TestCase):
+    def test_keeps_a_thread_id(self):
+        self.assertEqual(teams_graph.read_target("19:a@thread.v2"), ("19:a@thread.v2", None))
+
+    def test_reads_the_conversation_and_message_of_teams_links(self):
+        links = {
+            "https://teams.cloud.microsoft/l/chat/19%3A4c29%40thread.v2/conversations?context=%7B%22contextType%22%3A%22chat%22%7D":
+                ("19:4c29@thread.v2", None),
+            "https://teams.cloud.microsoft/l/message/19:1_2@unq.gbl.spaces/1795016344300?context=%7B%22contextType%22%3A%22chat%22%7D":
+                ("19:1_2@unq.gbl.spaces", "1795016344300"),
+            "https://teams.microsoft.com/l/message/19:c@thread.skype/1605223780000?tenantId=t&groupId=g&parentMessageId=1605223771864":
+                ("19:c@thread.skype", "1605223780000"),
+            "https://teams.microsoft.com/l/channel/19%3Ac%40thread.tacv2/G%C3%A9n%C3%A9ral?groupId=g&tenantId=t": ("19:c@thread.tacv2", None),
+            "https://teams.microsoft.com/l/team/19%3Ac%40thread.tacv2/conversations?groupId=g&tenantId=t": ("19:c@thread.tacv2", None),
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_N2I%40thread.v2/0?context=%7b%7d": ("19:meeting_N2I@thread.v2", None),
+        }
+        for link, target in links.items():
+            self.assertEqual(teams_graph.read_target(link), target, link)
+
+    def test_rejects_other_links(self):
+        for link in (
+            "http://teams.microsoft.com/l/chat/19%3Aa%40thread.v2/conversations",
+            "https://teams.microsoft.com.evil.example/l/chat/19%3Aa%40thread.v2/conversations",
+            "https://teams.microsoft.com/l/app/19%3Aa%40thread.v2",
+            "https://teams.microsoft.com/l/chat/0/0?users=a@example.com",
+            "https://teams.microsoft.com/l/message/19:a@thread.v2/abc",
+            "https://teams.microsoft.com/l/message/19:a@thread.v2",
+            "https://teams.microsoft.com/l/chat",
+            "https://teams.microsoft.com/chat/19%3Aa%40thread.v2",
+            "https://[::1/l/chat",
+        ):
+            with self.assertRaisesRegex(teams_graph.TeamsGraphError, "^Not a Teams link to a chat, channel, team, meeting or message: "):
+                teams_graph.read_target(link)
+
+
 class MainTest(unittest.TestCase):
     def run_main(self, argv, stdin="", answer=None):
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -474,6 +509,26 @@ class MainTest(unittest.TestCase):
         run.assert_called_once_with({
             "action": "read", "conversationId": "19:c@thread.tacv2", "threadId": None, "messageId": "1795016344300", "limit": 30,
         })
+
+    def test_reads_the_conversation_or_message_of_a_teams_link(self):
+        link = "https://teams.cloud.microsoft/l/message/19:a@thread.v2/1795018347192?context=%7B%22contextType%22%3A%22chat%22%7D"
+        for argv, message in (([], "1795018347192"), (["--message", "1795018347200"], "1795018347200")):
+            _, _, _, run = self.run_main(["read", link, *argv], answer={"messages": []})
+            run.assert_called_once_with({
+                "action": "read", "conversationId": "19:a@thread.v2", "threadId": None, "messageId": message, "limit": 30,
+            })
+        _, _, _, run = self.run_main(["read", "https://teams.microsoft.com/l/channel/19%3Ac%40thread.tacv2/General"], answer={"messages": []})
+        self.assertEqual(run.call_args.args[0]["conversationId"], "19:c@thread.tacv2")
+
+    def test_refuses_a_message_link_with_a_thread_or_an_unsupported_link(self):
+        for argv, error in (
+            (["https://teams.cloud.microsoft/l/message/19:c@thread.tacv2/2", "--thread", "1"], "A message link cannot be combined with --thread"),
+            (["https://teams.microsoft.com/l/chat/0/0?users=a"], "Not a Teams link to a chat, channel, team, meeting or message"),
+        ):
+            code, stdout, stderr, run = self.run_main(["read", *argv])
+            self.assertEqual((code, stdout), (1, ""))
+            self.assertIn(error, stderr)
+            run.assert_not_called()
 
     def test_rejects_an_invalid_starting_message_or_one_combined_with_a_thread(self):
         for argv, error in (

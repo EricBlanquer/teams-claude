@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import websockets
 
@@ -23,6 +23,13 @@ CDP_URL = "http://127.0.0.1:9333"
 TEAMS_HOSTS = {"teams.cloud.microsoft", "teams.microsoft.com"}
 PAGE_SCRIPT = Path(__file__).with_name("teams_graph.js")
 SCRIPT_PATH_PLACEHOLDER = '"__TEAMS_GRAPH_SCRIPT__"'
+LINK_MARKER = "://"
+LINK_SCHEME = "https"
+LINK_PREFIX = "l"
+MESSAGE_LINK = "message"
+CONVERSATION_LINKS = {"chat", "channel", "team", "meetup-join", MESSAGE_LINK}
+CONVERSATION_ID = re.compile(r"(19|48):\S+")
+UNSUPPORTED_LINK = "Not a Teams link to a chat, channel, team, meeting or message: "
 TIMEOUT_SECONDS = 60
 CONFIRMATION_TIMEOUT_SECONDS = 300
 EVALUATE_ID = 1
@@ -438,6 +445,23 @@ def message_id(value):
     return value
 
 
+def read_target(value):
+    if LINK_MARKER not in value:
+        return value, None
+    try:
+        link = urlparse(value)
+    except ValueError as ex:
+        raise TeamsGraphError(UNSUPPORTED_LINK + value) from ex
+    prefix, kind, conversation_id, message = ([unquote(segment) for segment in link.path.split("/")[1:]] + [""] * 4)[:4]
+    supported = (
+        link.scheme == LINK_SCHEME and link.hostname in TEAMS_HOSTS and prefix == LINK_PREFIX and kind in CONVERSATION_LINKS
+        and CONVERSATION_ID.fullmatch(conversation_id) and (kind != MESSAGE_LINK or message.isdigit())
+    )
+    if not supported:
+        raise TeamsGraphError(UNSUPPORTED_LINK + value)
+    return conversation_id, (message if kind == MESSAGE_LINK else None)
+
+
 def page_script():
     script = PAGE_SCRIPT.read_text(encoding="utf-8").strip()
     return script.replace(SCRIPT_PATH_PLACEHOLDER, json.dumps(str(Path(__file__).resolve())))
@@ -515,7 +539,9 @@ def main(argv=None):
     chats.add_argument("--query", default="", help="keep conversations whose title contains every word of QUERY")
     chats.add_argument("--limit", type=positive_integer, default=DEFAULT_CONVERSATION_LIMIT)
     read = commands.add_parser("read", help="print the latest messages of a conversation, oldest first")
-    read.add_argument("conversation_id", help="Teams thread id of the chat or channel")
+    read.add_argument(
+        "conversation_id", help="Teams thread id of the chat or channel, or a Teams link to a chat, channel, team, meeting or message",
+    )
     read_start = read.add_mutually_exclusive_group()
     read_start.add_argument("--thread", metavar="MESSAGE_ID", help="read the replies of this channel post")
     read_start.add_argument(
@@ -546,9 +572,12 @@ def main(argv=None):
         elif args.command == "chats":
             request = {"action": "chats", "query": args.query, "limit": args.limit}
         elif args.command == "read":
+            conversation_id, link_message = read_target(args.conversation_id)
+            message = args.message or link_message
+            if args.thread and message:
+                raise TeamsGraphError("A message link cannot be combined with --thread")
             request = {
-                "action": "read", "conversationId": args.conversation_id, "threadId": args.thread, "messageId": args.message,
-                "limit": args.limit,
+                "action": "read", "conversationId": conversation_id, "threadId": args.thread, "messageId": message, "limit": args.limit,
             }
         elif args.command == "watch":
             request = {"action": "read", "conversationId": args.conversation_id, "threadId": args.thread, "limit": WATCH_MESSAGE_LIMIT}
