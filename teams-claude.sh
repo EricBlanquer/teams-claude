@@ -235,8 +235,9 @@ print("Downloaded xterm.js + addons + CSS")
 with open(os.path.join(TEAMS_DIR, "terminal.js"), encoding="utf-8") as terminal_file:
     TERMINAL_JS = terminal_file.read()
 
-with open(os.path.join(TEAMS_DIR, "teams_graph.js"), encoding="utf-8") as graph_file:
-    TEAMS_GRAPH_JS = graph_file.read()
+sys.path.insert(0, TEAMS_DIR)
+import teams_graph
+TEAMS_GRAPH_JS = teams_graph.page_script()
 
 CLIPBOARD_FIX_JS = r"""
 (function installTeamsClipboardFix() {

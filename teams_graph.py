@@ -22,6 +22,7 @@ import websockets
 CDP_URL = "http://127.0.0.1:9333"
 TEAMS_HOSTS = {"teams.cloud.microsoft", "teams.microsoft.com"}
 PAGE_SCRIPT = Path(__file__).with_name("teams_graph.js")
+SCRIPT_PATH_PLACEHOLDER = '"__TEAMS_GRAPH_SCRIPT__"'
 TIMEOUT_SECONDS = 60
 CONFIRMATION_TIMEOUT_SECONDS = 300
 EVALUATE_ID = 1
@@ -437,8 +438,13 @@ def message_id(value):
     return value
 
 
+def page_script():
+    script = PAGE_SCRIPT.read_text(encoding="utf-8").strip()
+    return script.replace(SCRIPT_PATH_PLACEHOLDER, json.dumps(str(Path(__file__).resolve())))
+
+
 def page_expression(request):
-    return f"({PAGE_SCRIPT.read_text(encoding='utf-8').strip()})({json.dumps(request)})"
+    return f"({page_script()})({json.dumps(request)})"
 
 
 async def evaluate(websocket_url, expression):
@@ -510,7 +516,12 @@ def main(argv=None):
     chats.add_argument("--limit", type=positive_integer, default=DEFAULT_CONVERSATION_LIMIT)
     read = commands.add_parser("read", help="print the latest messages of a conversation, oldest first")
     read.add_argument("conversation_id", help="Teams thread id of the chat or channel")
-    read.add_argument("--thread", metavar="MESSAGE_ID", help="read the replies of this channel post")
+    read_start = read.add_mutually_exclusive_group()
+    read_start.add_argument("--thread", metavar="MESSAGE_ID", help="read the replies of this channel post")
+    read_start.add_argument(
+        "--message", type=message_id, metavar="MESSAGE_ID",
+        help="read from this message on, oldest first; in a channel, within its thread, after the post a reply belongs to",
+    )
     read.add_argument("--limit", type=positive_integer, default=DEFAULT_MESSAGE_LIMIT)
     read.add_argument("--images", type=Path, metavar="DIR", help="save the images of the messages in DIR and list their files")
     read.add_argument("--files", type=Path, metavar="DIR", help="save the files attached to the messages in DIR and list them")
@@ -535,7 +546,10 @@ def main(argv=None):
         elif args.command == "chats":
             request = {"action": "chats", "query": args.query, "limit": args.limit}
         elif args.command == "read":
-            request = {"action": "read", "conversationId": args.conversation_id, "threadId": args.thread, "limit": args.limit}
+            request = {
+                "action": "read", "conversationId": args.conversation_id, "threadId": args.thread, "messageId": args.message,
+                "limit": args.limit,
+            }
         elif args.command == "watch":
             request = {"action": "read", "conversationId": args.conversation_id, "threadId": args.thread, "limit": WATCH_MESSAGE_LIMIT}
             watch(request, args.after, args.interval)

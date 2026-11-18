@@ -39,6 +39,25 @@
     var TERMINAL_PANEL_SELECTOR = '[id$="-terminal-panel"]';
     var PROMPT_CAPTURE = '__teamsAssistantPromptConversation';
     var PROMPT_HANDLER = '__teamsAssistantPromptHandler';
+    var TEAMS_GRAPH_SCRIPT = "__TEAMS_GRAPH_SCRIPT__";
+    var MESSAGE_ACTIONS_SELECTOR = '[data-tid="message-actions-container"]';
+    var MORE_ACTIONS_SELECTOR = '[data-tid="message-actions-more"]';
+    var BUTTON_ICON_SELECTOR = '.fui-Button__icon';
+    var MESSAGE_LINK_TID = 'message-actions-assistant-link';
+    var MESSAGE_LINK_OBSERVER = '__teamsAssistantMessageLinkObserver';
+    var POPOVER_SURFACE_SUFFIX = '-popover-surface';
+    var REACT_FIBER_PREFIX = '__reactFiber$';
+    var MESSAGE_ID_PATTERN = /^\d+$/;
+    var CONVERSATION_ID_PATTERN = /^(19|48):/;
+    var MESSAGE_LINK_LABEL = 'Copier le lien pour Claude';
+    var MESSAGE_LINK_COPIED = 'Lien copié';
+    var MESSAGE_LINK_FAILED = 'Copie impossible\u00A0: ';
+    var MESSAGE_LINK_FEEDBACK_MS = 1500;
+    var SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+    var ICON_VIEW_BOX = '0 0 20 20';
+    var LINK_ICON_PATH = 'M8.5 6.5H6a3.5 3.5 0 0 0 0 7h2.5M11.5 6.5H14a3.5 3.5 0 0 1 0 7h-2.5M7 10h6';
+    var COPIED_ICON_PATH = 'M4.5 10.5l3.5 3.5 7.5-8';
+    var FAILED_ICON_PATH = 'M6 6l8 8M14 6l-8 8';
     var SELF_CHAT_ID = '48:notes';
     var MISSING_USER_STATUSES = [403, 404];
     var NAME_BOUNDARY = '(?![\\p{L}\\p{N}])';
@@ -454,18 +473,40 @@
         return messages.length >= limit && Number(messages.slice().sort(creationOrder)[limit - 1].id) >= oldestVersion;
     }
 
+    async function conversationMessage(clients, conversationId, messageId) {
+        try {
+            return await chatServiceRequest(clients, conversationPath(conversationId) + '/messages/' + encodeURIComponent(messageId));
+        } catch (ex) {
+            if (ex.status === 404) throw new Error('Message ' + messageId + ' does not exist in conversation ' + conversationId);
+            throw ex;
+        }
+    }
+
+    async function startingMessages(clients, target, start, messages, limit) {
+        var later = messages
+            .filter(function(message) { return Number(message.id) > Number(start.id); })
+            .sort(creationOrder)
+            .reverse()
+            .slice(0, limit - 1);
+        var reply = target.kind === 'channel' && start.rootMessageId && start.rootMessageId !== start.id;
+        var root = reply ? [await conversationMessage(clients, target.conversationId, start.rootMessageId)] : [];
+        return root.concat([start], later);
+    }
+
     async function readMessages(request) {
         var limit = Number(request.limit) || DEFAULT_MESSAGE_LIMIT;
         var clients = await teamsClients();
         var target = await conversationTarget(clients, request.conversationId);
-        if (request.threadId && target.kind !== 'channel') throw new Error('Only channel posts have reply threads');
-        var thread = request.threadId ? target.conversationId + ';messageid=' + request.threadId : target.conversationId;
+        var start = request.messageId ? await conversationMessage(clients, target.conversationId, request.messageId) : null;
+        var threadId = start && target.kind === 'channel' ? start.rootMessageId || start.id : request.threadId;
+        if (threadId && target.kind !== 'channel') throw new Error('Only channel posts have reply threads');
+        var thread = threadId ? target.conversationId + ';messageid=' + threadId : target.conversationId;
         var next = conversationPath(thread) + '/messages?view=' + encodeURIComponent(MESSAGE_VIEW) +
-            '&pageSize=' + Math.min(limit, MESSAGE_PAGE_SIZE) + '&startTime=1';
+            '&pageSize=' + (start ? MESSAGE_PAGE_SIZE : Math.min(limit, MESSAGE_PAGE_SIZE)) + '&startTime=' + (start ? start.id : 1);
         var me = signedInUserId();
         var messages = [];
         var oldestVersion = Infinity;
-        while (next && !hasLatestMessages(messages, limit, oldestVersion)) {
+        while (next && (start || !hasLatestMessages(messages, limit, oldestVersion))) {
             var page = await chatServiceRequest(clients, next);
             var received = page.messages || [];
             received.forEach(function(message) { oldestVersion = Math.min(oldestVersion, Number(message.version) || 0); });
@@ -473,9 +514,14 @@
             var backward = received.length && page._metadata ? page._metadata.backwardLink : null;
             next = backward && backward !== next ? backward : null;
         }
+        var selected = start ? await startingMessages(clients, target, start, messages, limit) : messages.sort(creationOrder).slice(0, limit).reverse();
         return Object.assign(publicTarget(target), {
-            threadId: request.threadId || undefined,
-            messages: messages.sort(creationOrder).slice(0, limit).reverse().map(function(message) { return messageSummary(message, me); }),
+            threadId: threadId || undefined,
+            messages: selected.map(function(message) {
+                var summary = messageSummary(message, me);
+                if (message === start) summary.target = true;
+                return summary;
+            }),
         });
     }
 
@@ -980,7 +1026,96 @@
         return conversation;
     }
 
+    function shellQuote(value) {
+        return "'" + value.replace(/'/g, "'\\''") + "'";
+    }
+
+    function reactConversationId(element) {
+        var key = Object.keys(element).find(function(name) { return name.indexOf(REACT_FIBER_PREFIX) === 0; });
+        for (var fiber = key ? element[key] : null; fiber; fiber = fiber.return) {
+            var props = fiber.memoizedProps;
+            if (props && typeof props.convId === 'string' && CONVERSATION_ID_PATTERN.test(props.convId)) return props.convId;
+        }
+        return null;
+    }
+
+    function messageReadCommand(surface) {
+        var surfaceId = surface ? surface.id : '';
+        var messageId = surfaceId.endsWith(POPOVER_SURFACE_SUFFIX) ? surfaceId.slice(0, -POPOVER_SURFACE_SUFFIX.length) : '';
+        if (!MESSAGE_ID_PATTERN.test(messageId)) throw new Error('message introuvable');
+        var conversationId = reactConversationId(surface) || displayedConversation().conversationId;
+        return 'python3 ' + shellQuote(TEAMS_GRAPH_SCRIPT) + ' read ' + shellQuote(conversationId) + ' --message ' + messageId;
+    }
+
+    function showLinkState(button, path, label) {
+        button.querySelector('path').setAttribute('d', path);
+        button.setAttribute('aria-label', label);
+        button.title = label;
+    }
+
+    async function copyMessageLink(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var button = event.currentTarget;
+        try {
+            await navigator.clipboard.writeText(messageReadCommand(button.closest(MESSAGE_ACTIONS_SELECTOR)));
+            showLinkState(button, COPIED_ICON_PATH, MESSAGE_LINK_COPIED);
+            setTimeout(function() { showLinkState(button, LINK_ICON_PATH, MESSAGE_LINK_LABEL); }, MESSAGE_LINK_FEEDBACK_MS);
+        } catch (ex) {
+            showLinkState(button, FAILED_ICON_PATH, MESSAGE_LINK_FAILED + (ex && ex.message ? ex.message : String(ex)));
+        }
+    }
+
+    function messageLinkButton(more) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = more.className;
+        button.setAttribute('data-tid', MESSAGE_LINK_TID);
+        var icon = document.createElement('span');
+        var moreIcon = more.querySelector(BUTTON_ICON_SELECTOR);
+        if (moreIcon) icon.className = moreIcon.className;
+        var svg = document.createElementNS(SVG_NAMESPACE, 'svg');
+        svg.setAttribute('width', '1em');
+        svg.setAttribute('height', '1em');
+        svg.setAttribute('viewBox', ICON_VIEW_BOX);
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round');
+        svg.setAttribute('aria-hidden', 'true');
+        svg.append(document.createElementNS(SVG_NAMESPACE, 'path'));
+        icon.append(svg);
+        button.append(icon);
+        showLinkState(button, LINK_ICON_PATH, MESSAGE_LINK_LABEL);
+        button.addEventListener('click', copyMessageLink);
+        return button;
+    }
+
+    function addMessageLinkButtons(root) {
+        var anchors = root.matches(MORE_ACTIONS_SELECTOR) ? [root] : Array.from(root.querySelectorAll(MORE_ACTIONS_SELECTOR));
+        anchors.forEach(function(more) {
+            var previous = more.previousElementSibling;
+            if (!more.closest(MESSAGE_ACTIONS_SELECTOR) || (previous && previous.getAttribute('data-tid') === MESSAGE_LINK_TID)) return;
+            more.before(messageLinkButton(more));
+        });
+    }
+
+    function installMessageLinks() {
+        if (window[MESSAGE_LINK_OBSERVER]) window[MESSAGE_LINK_OBSERVER].disconnect();
+        var observer = new MutationObserver(function(records) {
+            records.forEach(function(record) {
+                Array.from(record.addedNodes).forEach(function(node) {
+                    if (node.nodeType === Node.ELEMENT_NODE) addMessageLinkButtons(node);
+                });
+            });
+        });
+        observer.observe(document.body, {childList: true, subtree: true});
+        window[MESSAGE_LINK_OBSERVER] = observer;
+        addMessageLinkButtons(document.body);
+    }
+
     installPromptCapture();
+    installMessageLinks();
 
     return async function teamsGraph(request) {
         try {

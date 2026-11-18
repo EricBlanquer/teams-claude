@@ -23,6 +23,7 @@ const HTML_RULES = JSON.parse(execFileSync('python3', ['-c', 'import json, teams
 const VOID_TAGS = new Set(['br', 'hr']);
 const AUTHOR_ID = '788131fa-e0d9-401b-b065-d221204dcd05';
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const ELEMENT_NODE = 1;
 
 class FakeText {
     constructor(data) {
@@ -104,11 +105,40 @@ class FakeElement {
         return clone;
     }
 
+    get nodeType() {
+        return ELEMENT_NODE;
+    }
+
+    matches(selector) {
+        if (selector === '*') return true;
+        const attribute = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
+        if (attribute) return attribute[2] === undefined ? this.hasAttribute(attribute[1]) : this.getAttribute(attribute[1]) === attribute[2];
+        if (selector.startsWith('.')) return String(this.className || '').split(' ').includes(selector.slice(1));
+        return this.localName === selector;
+    }
+
     querySelectorAll(selector) {
-        const elements = this.descendants().filter(node => node instanceof FakeElement);
-        if (selector === '*') return elements;
-        const attribute = /^\[([\w-]+)\]$/.exec(selector);
-        return elements.filter(node => (attribute ? node.hasAttribute(attribute[1]) : node.localName === selector));
+        return this.descendants().filter(node => node instanceof FakeElement && node.matches(selector));
+    }
+
+    querySelector(selector) {
+        return this.querySelectorAll(selector)[0] || null;
+    }
+
+    closest(selector) {
+        let node = this;
+        while (node && !node.matches(selector)) node = node.parent;
+        return node;
+    }
+
+    get previousElementSibling() {
+        const siblings = this.parent ? this.parent.children.filter(node => node instanceof FakeElement) : [];
+        return siblings[siblings.indexOf(this) - 1] || null;
+    }
+
+    before(node) {
+        node.parent = this.parent;
+        this.parent.children.splice(this.parent.children.indexOf(this), 0, node);
     }
 
     append(...nodes) {
@@ -237,9 +267,29 @@ const DEFAULT_CONVERSATIONS = [
     conversation('48:notes', {productThreadType: 'StreamOfNotes'}),
 ];
 
+class FakeMutationObserver {
+    constructor(callback) {
+        this.callback = callback;
+        this.disconnected = false;
+    }
+
+    observe(target, options) {
+        this.target = target;
+        this.options = options;
+    }
+
+    disconnect() {
+        this.disconnected = true;
+    }
+
+    added(...nodes) {
+        this.callback([{addedNodes: nodes}]);
+    }
+}
+
 function environment({
     credentials = VALID_TOKENS, regions = [CHAT_SERVICE], conversations = DEFAULT_CONVERSATIONS, graph = {}, routes = {},
-    elements = [], title = null, documentTitle = 'Chat | Teams',
+    elements = [], title = null, documentTitle = 'Chat | Teams', clipboardError = null,
 } = {}) {
     const entries = [
         ...credentials.map((credential, index) => [`credential-${index}`, JSON.stringify(credential)]),
@@ -254,6 +304,8 @@ function environment({
     const timers = [];
     const blobs = [];
     const revoked = [];
+    const copied = [];
+    const observers = [];
     const graphObjects = {[ME_URL]: found({id: 'me', displayName: 'Eric Blanquer'}), ...graph};
     const allRoutes = {
         [`POST ${GRAPH}/$batch`]: (url, init) => jsonResponse(200, {
@@ -282,8 +334,24 @@ function environment({
             querySelectorAll: selector => (selector === '[data-track-thread-id]' ? elements : []),
             querySelector: selector => (selector === '[data-tid="chat-title"]' ? title : null),
             createElement: tag => new FakeElement(context.document, tag),
+            createElementNS: (namespace, tag) => new FakeElement(context.document, tag),
             getElementById: id => context.document.body.descendants().find(node => node.id === id) || null,
         },
+        navigator: {
+            clipboard: {
+                writeText: async text => {
+                    if (clipboardError) throw new Error(clipboardError);
+                    copied.push(text);
+                },
+            },
+        },
+        MutationObserver: class extends FakeMutationObserver {
+            constructor(callback) {
+                super(callback);
+                observers.push(this);
+            }
+        },
+        Node: {ELEMENT_NODE},
         setTimeout: (callback, delay) => timers.push({callback, delay}),
         clearTimeout: id => {
             timers[id - 1] = null;
@@ -315,7 +383,7 @@ function environment({
     const teamsGraph = vm.runInContext(source, context);
     const dialog = () => context.document.getElementById(DIALOG_ID);
     return {
-        teamsGraph, requests, writes, window, listeners, removed, timers, blobs, revoked, document: context.document, dialog,
+        teamsGraph, requests, writes, window, listeners, removed, timers, blobs, revoked, copied, observers, document: context.document, dialog,
         button: label => dialog().descendants().find(node => node.tagName === 'BUTTON' && node.textContent === label),
         frame: () => dialog().descendants().find(node => node.tagName === 'IFRAME'),
         texts: () => dialog().descendants().filter(node => node.tagName === 'P' && !node.hidden).map(node => node.textContent),
@@ -591,12 +659,130 @@ test('replaces the previous capture listener on every evaluation', async () => {
     assert.deepEqual(env.removed, []);
     const previous = env.listeners[0].listener;
     vm.runInContext(source, vm.createContext(Object.assign(Object.create(null), {
-        window: env.window, document: {}, localStorage: {length: 0}, Date,
+        window: env.window, document: env.document, localStorage: {length: 0}, Date, MutationObserver: FakeMutationObserver,
     })));
     assert.equal(env.removed.length, 1);
     assert.equal(env.removed[0].listener, previous);
     assert.equal(env.listeners.length, 2);
     assert.equal(env.window.__teamsAssistantPromptHandler, env.listeners[1].listener);
+});
+
+const MESSAGE_ID = '1795016344300';
+const LINK_LABEL = 'Copier le lien pour Claude';
+
+function fakeElement(env, tag, attributes = {}, className = '') {
+    const node = env.document.createElement(tag);
+    Object.entries(attributes).forEach(([name, value]) => node.setAttribute(name, value));
+    node.className = className;
+    return node;
+}
+
+function messageActions(env, surfaceId = `${MESSAGE_ID}-popover-surface`, props = {convId: CHAT_ID}) {
+    const surface = fakeElement(env, 'div', {'data-tid': 'message-actions-container'});
+    surface.id = surfaceId;
+    surface.__reactFiber$test = {memoizedProps: {}, return: {memoizedProps: props, return: null}};
+    const toolbar = fakeElement(env, 'div', {role: 'toolbar'});
+    const more = fakeElement(env, 'a', {'data-tid': 'message-actions-more'}, 'fui-Button r1f29ykk');
+    more.append(fakeElement(env, 'span', {}, 'fui-Button__icon rywnvv2'));
+    toolbar.append(fakeElement(env, 'div', {'data-tid': 'message-reactions-toolbar'}), more);
+    surface.append(toolbar);
+    env.document.body.append(surface);
+    env.observers.at(-1).added(surface);
+    return {surface, toolbar, more};
+}
+
+function linkButtons(root) {
+    return root.querySelectorAll('[data-tid="message-actions-assistant-link"]');
+}
+
+async function clickLink(button) {
+    const event = {defaultPrevented: false, propagationStopped: false, currentTarget: button};
+    event.preventDefault = () => { event.defaultPrevented = true; };
+    event.stopPropagation = () => { event.propagationStopped = true; };
+    await Promise.all(button.listeners.click.map(listener => listener(event)));
+    return event;
+}
+
+function linkState(button) {
+    return {label: button.getAttribute('aria-label'), title: button.title, icon: button.querySelector('path').getAttribute('d')};
+}
+
+test('adds one link button before the more options of each message toolbar', () => {
+    const env = environment();
+    const observer = env.observers.at(-1);
+    assert.equal(observer.target, env.document.body);
+    assert.deepEqual(plain(observer.options), {childList: true, subtree: true});
+    const {toolbar, more} = messageActions(env);
+    const button = more.previousElementSibling;
+    assert.equal(button.getAttribute('data-tid'), 'message-actions-assistant-link');
+    assert.equal(button.type, 'button');
+    assert.equal(button.className, more.className);
+    assert.equal(button.querySelector('span').className, 'fui-Button__icon rywnvv2');
+    assert.deepEqual([linkState(button).label, linkState(button).title], [LINK_LABEL, LINK_LABEL]);
+    assert.match(linkState(button).icon, /^M/);
+    observer.added(toolbar, button);
+    assert.equal(linkButtons(toolbar).length, 1);
+    const elsewhere = fakeElement(env, 'div');
+    elsewhere.append(fakeElement(env, 'a', {'data-tid': 'message-actions-more'}));
+    env.document.body.append(elsewhere);
+    observer.added(elsewhere);
+    assert.equal(linkButtons(elsewhere).length, 0);
+});
+
+test('copies the command that reads the message of the toolbar', async () => {
+    const env = environment();
+    const button = messageActions(env).more.previousElementSibling;
+    const initial = linkState(button);
+    const event = await clickLink(button);
+    assert.equal(event.defaultPrevented && event.propagationStopped, true);
+    assert.deepEqual(env.copied, [`python3 '__TEAMS_GRAPH_SCRIPT__' read '${CHAT_ID}' --message ${MESSAGE_ID}`]);
+    assert.deepEqual([linkState(button).label, linkState(button).title], ['Lien copié', 'Lien copié']);
+    assert.notEqual(linkState(button).icon, initial.icon);
+    assert.deepEqual(env.timers.map(timer => timer.delay), [1500]);
+    env.expire();
+    assert.deepEqual(linkState(button), initial);
+});
+
+test('falls back to the displayed conversation and quotes it for the shell', async () => {
+    const conversationId = "19:it's@thread.v2";
+    const env = environment({elements: [threadElement(conversationId, 'Chat')]});
+    await clickLink(messageActions(env, `${MESSAGE_ID}-popover-surface`, {convId: 'not-a-thread'}).more.previousElementSibling);
+    assert.deepEqual(env.copied, [`python3 '__TEAMS_GRAPH_SCRIPT__' read '19:it'\\''s@thread.v2' --message ${MESSAGE_ID}`]);
+});
+
+test('shows why the link could not be copied', async () => {
+    const failures = [
+        [environment(), 'menu-popover-surface', {convId: CHAT_ID}, 'message introuvable'],
+        [environment(), `${MESSAGE_ID}-popover-surface`, {}, 'No Teams conversation with a compose box is displayed'],
+        [environment({clipboardError: 'Document is not focused.'}), `${MESSAGE_ID}-popover-surface`, {convId: CHAT_ID}, 'Document is not focused.'],
+    ];
+    for (const [env, surfaceId, props, reason] of failures) {
+        const button = messageActions(env, surfaceId, props).more.previousElementSibling;
+        await clickLink(button);
+        assert.deepEqual([linkState(button).label, linkState(button).title], [`Copie impossible : ${reason}`, `Copie impossible : ${reason}`]);
+        assert.deepEqual(env.copied, []);
+        assert.deepEqual(env.timers, []);
+    }
+});
+
+test('replaces the previous message link observer and equips open toolbars on every evaluation', () => {
+    const env = environment();
+    const previous = env.observers.at(-1);
+    const {more} = messageActions(env);
+    more.previousElementSibling.remove();
+    const observers = [];
+    vm.runInContext(source, vm.createContext(Object.assign(Object.create(null), {
+        window: env.window, document: env.document, localStorage: {length: 0}, Date, Node: {ELEMENT_NODE},
+        MutationObserver: class extends FakeMutationObserver {
+            constructor(callback) {
+                super(callback);
+                observers.push(this);
+            }
+        },
+    })));
+    assert.equal(previous.disconnected, true);
+    assert.equal(env.window.__teamsAssistantMessageLinkObserver, observers[0]);
+    assert.equal(more.previousElementSibling.getAttribute('data-tid'), 'message-actions-assistant-link');
 });
 
 function member(userId, displayName, tenantId = 'tenant-id') {
@@ -1281,6 +1467,78 @@ test('stops paging when the service repeats the same link', async () => {
     const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID, limit: 50});
     assert.equal(outcome.ok, true, outcome.error);
     assert.equal(env.requests.filter(request => request.url.includes('/messages')).length, 2);
+});
+
+function messageRequests(env) {
+    return env.requests.filter(request => request.url.includes('/messages')).map(request => request.url);
+}
+
+test('reads a chat from a given message on, oldest first, across every page', async () => {
+    const older = `${messagesUrl(CHAT_ID)}?startTime=20&syncState=older`;
+    const env = environment({
+        routes: {
+            [`GET ${messagesUrl(CHAT_ID)}/20`]: jsonResponse(200, message('20')),
+            [`GET ${messagesUrl(CHAT_ID)}`]: url => jsonResponse(200, url.includes('syncState') ? {
+                messages: [message('20'), message('10', {version: '45'})], _metadata: {backwardLink: null},
+            } : {
+                messages: [message('50'), message('40', {version: '60'}), {id: '35', messagetype: 'ThreadActivity/AddMember'}, message('30')],
+                _metadata: {backwardLink: older},
+            }),
+        },
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID, messageId: '20', limit: 3});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.threadId, undefined);
+    assert.deepEqual(plain(outcome.result.messages).map(item => [item.id, item.target]), [['20', true], ['30', undefined], ['40', undefined]]);
+    const urls = messageRequests(env);
+    assert.equal(urls[0], `${messagesUrl(CHAT_ID)}/20`);
+    assert.match(urls[1], /\/messages\?view=msnp24Equivalent%7CsupportsMessageProperties&pageSize=200&startTime=20$/);
+    assert.deepEqual(urls.slice(2), [older]);
+});
+
+test('reads a channel reply within its thread, after the post it answers', async () => {
+    const thread = `${CHANNEL_ID};messageid=100`;
+    const env = environment({
+        routes: {
+            [`GET ${messagesUrl(CHANNEL_ID)}/102`]: jsonResponse(200, message('102', {rootMessageId: '100'})),
+            [`GET ${messagesUrl(CHANNEL_ID)}/100`]: jsonResponse(200, message('100')),
+            [`GET ${messagesUrl(thread)}`]: jsonResponse(200, {
+                messages: [message('104', {rootMessageId: '100'}), message('103', {rootMessageId: '100'}), message('102', {rootMessageId: '100'})],
+            }),
+        },
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHANNEL_ID, messageId: '102'});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.threadId, '100');
+    assert.deepEqual(plain(outcome.result.messages).map(item => [item.id, item.replyTo, item.target]), [
+        ['100', undefined, undefined], ['102', '100', true], ['103', '100', undefined], ['104', '100', undefined],
+    ]);
+    const page = messageRequests(env)[1];
+    assert.equal(page.startsWith(`${messagesUrl(thread)}?`) && page.endsWith('&startTime=102'), true, page);
+});
+
+test('reads a whole channel post thread from the post', async () => {
+    const thread = `${CHANNEL_ID};messageid=100`;
+    const env = environment({
+        routes: {
+            [`GET ${messagesUrl(CHANNEL_ID)}/100`]: jsonResponse(200, message('100')),
+            [`GET ${messagesUrl(thread)}`]: jsonResponse(200, {messages: [message('101', {rootMessageId: '100'}), message('100', {rootMessageId: '100'})]}),
+        },
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHANNEL_ID, messageId: '100'});
+    assert.equal(outcome.ok, true, outcome.error);
+    assert.equal(outcome.result.threadId, '100');
+    assert.deepEqual(plain(outcome.result.messages).map(item => [item.id, item.target]), [['100', true], ['101', undefined]]);
+    assert.equal(messageRequests(env).length, 2);
+});
+
+test('reports a message missing from the conversation before reading it', async () => {
+    const env = environment({
+        routes: {[`GET ${messagesUrl(CHAT_ID)}/99`]: jsonResponse(404, {subCode: 'MessageNotFound'})},
+    });
+    const outcome = await env.teamsGraph({action: 'read', conversationId: CHAT_ID, messageId: '99'});
+    assert.equal(outcome.error, `Message 99 does not exist in conversation ${CHAT_ID}`);
+    assert.equal(messageRequests(env).length, 1);
 });
 
 test('downloads Teams images with the chat service token only', async () => {

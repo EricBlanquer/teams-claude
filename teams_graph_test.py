@@ -313,8 +313,13 @@ class RunTest(unittest.TestCase):
         with FakeDevTools([page_target()], value_answer({"ok": True, "result": result})) as devtools:
             request = {"action": "send", "conversationId": "19:a@thread.v2", "replyTo": None, "html": "<b>é</b>"}
             self.assertEqual(teams_graph.run(request, devtools.url), result)
-        script = teams_graph.PAGE_SCRIPT.read_text(encoding="utf-8").strip()
-        self.assertEqual(devtools.expressions, [f"({script})({json.dumps(request)})"])
+        self.assertEqual(devtools.expressions, [f"({teams_graph.page_script()})({json.dumps(request)})"])
+
+    def test_gives_the_page_script_the_path_of_this_command(self):
+        script = teams_graph.page_script()
+        path = json.dumps(str(Path(teams_graph.__file__).resolve()))
+        self.assertIn(f"var TEAMS_GRAPH_SCRIPT = {path};", script)
+        self.assertNotIn("__TEAMS_GRAPH_SCRIPT__", script)
 
     def test_waits_for_the_confirmation_dialog_on_top_of_the_usual_timeout(self):
         self.assertEqual(teams_graph.request_timeout({"action": "current"}), teams_graph.TIMEOUT_SECONDS)
@@ -421,7 +426,9 @@ class MainTest(unittest.TestCase):
         answer = {"title": "Projet", "messages": [{"id": "1", "time": None, "html": "<p>a &amp; b</p>"}]}
         code, stdout, _, run = self.run_main(["read", "19:c@thread.tacv2", "--thread", "1", "--limit", "3"], answer=answer)
         self.assertEqual(code, 0)
-        run.assert_called_once_with({"action": "read", "conversationId": "19:c@thread.tacv2", "threadId": "1", "limit": 3})
+        run.assert_called_once_with({
+            "action": "read", "conversationId": "19:c@thread.tacv2", "threadId": "1", "messageId": None, "limit": 3,
+        })
         self.assertEqual(json.loads(stdout), {
             "notice": teams_graph.UNTRUSTED_NOTICE, "title": "Projet", "messages": [{"id": "1", "time": None, "text": "a & b"}],
         })
@@ -434,7 +441,7 @@ class MainTest(unittest.TestCase):
                 contextlib.redirect_stdout(stdout):
             self.assertEqual(teams_graph.main(["read", "48:notes", "--files", root]), 0)
             self.assertEqual(run.call_args_list, [
-                mock.call({"action": "read", "conversationId": "48:notes", "threadId": None, "limit": 30}),
+                mock.call({"action": "read", "conversationId": "48:notes", "threadId": None, "messageId": None, "limit": 30}),
                 mock.call({"action": "files", "files": [{"driveId": "b!d", "itemId": "I1", "authorId": "a1"}]}),
             ])
             saved = Path(root).resolve() / "1-run.log"
@@ -451,7 +458,7 @@ class MainTest(unittest.TestCase):
                 contextlib.redirect_stdout(stdout):
             self.assertEqual(teams_graph.main(["read", "48:notes", "--images", root]), 0)
             self.assertEqual(run.call_args_list, [
-                mock.call({"action": "read", "conversationId": "48:notes", "threadId": None, "limit": 30}),
+                mock.call({"action": "read", "conversationId": "48:notes", "threadId": None, "messageId": None, "limit": 30}),
                 mock.call({"action": "images", "urls": ["a"]}),
             ])
             image = Path(root).resolve() / "1-1.png"
@@ -460,7 +467,26 @@ class MainTest(unittest.TestCase):
 
     def test_reads_the_default_number_of_messages(self):
         _, _, _, run = self.run_main(["read", "48:notes"], answer={"messages": []})
-        run.assert_called_once_with({"action": "read", "conversationId": "48:notes", "threadId": None, "limit": 30})
+        run.assert_called_once_with({"action": "read", "conversationId": "48:notes", "threadId": None, "messageId": None, "limit": 30})
+
+    def test_reads_from_a_given_message(self):
+        _, _, _, run = self.run_main(["read", "19:c@thread.tacv2", "--message", "1795016344300"], answer={"messages": []})
+        run.assert_called_once_with({
+            "action": "read", "conversationId": "19:c@thread.tacv2", "threadId": None, "messageId": "1795016344300", "limit": 30,
+        })
+
+    def test_rejects_an_invalid_starting_message_or_one_combined_with_a_thread(self):
+        for argv, error in (
+            (["--message", "12a"], "must be a Teams message id"),
+            (["--message", "1", "--thread", "1"], "not allowed with argument"),
+        ):
+            stderr = io.StringIO()
+            with mock.patch.object(teams_graph, "run") as run, contextlib.redirect_stderr(stderr), \
+                    self.assertRaises(SystemExit) as raised:
+                teams_graph.main(["read", "19:c@thread.tacv2", *argv])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(error, stderr.getvalue())
+            run.assert_not_called()
 
     def test_rejects_a_non_positive_limit(self):
         for value in ("0", "-1", "x"):
