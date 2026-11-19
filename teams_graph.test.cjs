@@ -141,6 +141,11 @@ class FakeElement {
         this.parent.children.splice(this.parent.children.indexOf(this), 0, node);
     }
 
+    after(node) {
+        node.parent = this.parent;
+        this.parent.children.splice(this.parent.children.indexOf(this) + 1, 0, node);
+    }
+
     append(...nodes) {
         nodes.forEach(node => {
             node.parent = this;
@@ -162,6 +167,11 @@ class FakeElement {
 
     addEventListener(type, listener) {
         (this.listeners[type] ||= []).push(listener);
+    }
+
+    dispatchEvent(event) {
+        (this.events ||= []).push(event);
+        (this.listeners[event.type] || []).forEach(listener => listener(event));
     }
 
     dispatch(type, event = {}) {
@@ -196,6 +206,11 @@ class FakeFrameDocument {
 
     addEventListener(type, listener) {
         (this.listeners[type] ||= []).push(listener);
+    }
+
+    dispatchEvent(event) {
+        (this.events ||= []).push(event);
+        (this.listeners[event.type] || []).forEach(listener => listener(event));
     }
 
     dispatch(type, event = {}) {
@@ -352,6 +367,11 @@ function environment({
             }
         },
         Node: {ELEMENT_NODE},
+        KeyboardEvent: class {
+            constructor(type, init) {
+                Object.assign(this, {type}, init);
+            }
+        },
         setTimeout: (callback, delay) => timers.push({callback, delay}),
         clearTimeout: id => {
             timers[id - 1] = null;
@@ -669,6 +689,10 @@ test('replaces the previous capture listener on every evaluation', async () => {
 
 const MESSAGE_ID = '1795016344300';
 const LINK_LABEL = 'Copier le lien pour Claude';
+const LINK_TID = 'message-actions-assistant-link';
+const COPY_LINK_TID = 'message-actions-copy-link';
+const SAVE_TID = 'message-actions-save';
+const MORE_ID = 'menur24r';
 
 function fakeElement(env, tag, attributes = {}, className = '') {
     const node = env.document.createElement(tag);
@@ -681,95 +705,167 @@ function messageActions(env, surfaceId = `${MESSAGE_ID}-popover-surface`, props 
     const surface = fakeElement(env, 'div', {'data-tid': 'message-actions-container'});
     surface.id = surfaceId;
     surface.__reactFiber$test = {memoizedProps: {}, return: {memoizedProps: props, return: null}};
-    const toolbar = fakeElement(env, 'div', {role: 'toolbar'});
     const more = fakeElement(env, 'a', {'data-tid': 'message-actions-more'}, 'fui-Button r1f29ykk');
-    more.append(fakeElement(env, 'span', {}, 'fui-Button__icon rywnvv2'));
-    toolbar.append(fakeElement(env, 'div', {'data-tid': 'message-reactions-toolbar'}), more);
-    surface.append(toolbar);
+    more.id = MORE_ID;
+    surface.append(more);
     env.document.body.append(surface);
     env.observers.at(-1).added(surface);
-    return {surface, toolbar, more};
+    return {surface, more};
 }
 
-function linkButtons(root) {
-    return root.querySelectorAll('[data-tid="message-actions-assistant-link"]');
+function menuItem(env, tid) {
+    const item = fakeElement(env, 'div', {role: 'menuitem', 'data-tid': tid}, 'fui-MenuItem rfoezjv');
+    const content = fakeElement(env, 'span', {}, 'fui-MenuItem__content r1ls86vo');
+    content.textContent = tid;
+    item.append(fakeElement(env, 'span', {}, 'fui-MenuItem__icon ro9koqv'), content);
+    return item;
 }
 
-async function clickLink(button) {
-    const event = {defaultPrevented: false, propagationStopped: false, currentTarget: button};
+function openMenu(env, triggerId = MORE_ID, tids = [COPY_LINK_TID, SAVE_TID]) {
+    const popover = fakeElement(env, 'div', {}, 'fui-MenuPopover');
+    const menu = fakeElement(env, 'div', {role: 'menu', 'aria-labelledby': triggerId});
+    menu.append(...tids.map(tid => menuItem(env, tid)));
+    popover.append(menu);
+    env.document.body.append(popover);
+    env.observers.at(-1).added(popover);
+    return menu;
+}
+
+function linkItems(root) {
+    return root.querySelectorAll(`[data-tid="${LINK_TID}"]`);
+}
+
+function menuTids(menu) {
+    return menu.children.map(item => item.getAttribute('data-tid'));
+}
+
+function menuLink(env, surfaceId, props) {
+    messageActions(env, surfaceId, props);
+    return linkItems(openMenu(env))[0];
+}
+
+async function clickLink(item) {
+    const event = {defaultPrevented: false, propagationStopped: false, currentTarget: item};
     event.preventDefault = () => { event.defaultPrevented = true; };
     event.stopPropagation = () => { event.propagationStopped = true; };
-    await Promise.all(button.listeners.click.map(listener => listener(event)));
+    await Promise.all(item.listeners.click.map(listener => listener(event)));
     return event;
 }
 
-function linkState(button) {
-    return {label: button.getAttribute('aria-label'), title: button.title, icon: button.querySelector('path').getAttribute('d')};
+function linkState(item) {
+    return {text: item.querySelector('.fui-MenuItem__content').textContent, title: item.title, icon: item.querySelector('path').getAttribute('d')};
 }
 
-test('adds one link button before the more options of each message toolbar', () => {
+test('adds one link item after the copy link of each message menu', () => {
     const env = environment();
     const observer = env.observers.at(-1);
     assert.equal(observer.target, env.document.body);
     assert.deepEqual(plain(observer.options), {childList: true, subtree: true});
-    const {toolbar, more} = messageActions(env);
-    const button = more.previousElementSibling;
-    assert.equal(button.getAttribute('data-tid'), 'message-actions-assistant-link');
-    assert.equal(button.type, 'button');
-    assert.equal(button.className, more.className);
-    assert.equal(button.querySelector('span').className, 'fui-Button__icon rywnvv2');
-    assert.deepEqual([linkState(button).label, linkState(button).title], [LINK_LABEL, LINK_LABEL]);
-    assert.match(linkState(button).icon, /^M/);
-    observer.added(toolbar, button);
-    assert.equal(linkButtons(toolbar).length, 1);
-    const elsewhere = fakeElement(env, 'div');
-    elsewhere.append(fakeElement(env, 'a', {'data-tid': 'message-actions-more'}));
-    env.document.body.append(elsewhere);
-    observer.added(elsewhere);
-    assert.equal(linkButtons(elsewhere).length, 0);
+    messageActions(env);
+    const menu = openMenu(env);
+    assert.deepEqual(menuTids(menu), [COPY_LINK_TID, LINK_TID, SAVE_TID]);
+    const item = linkItems(menu)[0];
+    assert.equal(item.getAttribute('role'), 'menuitem');
+    assert.equal(item.getAttribute('tabindex'), '0');
+    assert.equal(item.className, 'fui-MenuItem rfoezjv');
+    assert.deepEqual(item.children.map(part => part.className), ['fui-MenuItem__icon ro9koqv', 'fui-MenuItem__content r1ls86vo']);
+    assert.deepEqual([linkState(item).text, linkState(item).title], [LINK_LABEL, LINK_LABEL]);
+    assert.match(linkState(item).icon, /^M/);
+    observer.added(item);
+    observer.added(menu.parent);
+    assert.equal(linkItems(menu).length, 1);
 });
 
-test('copies the command that reads the message of the toolbar', async () => {
+test('puts the link item first when the menu has no copy link and fills a menu populated later', () => {
     const env = environment();
-    const button = messageActions(env).more.previousElementSibling;
-    const initial = linkState(button);
-    const event = await clickLink(button);
+    messageActions(env);
+    assert.deepEqual(menuTids(openMenu(env, MORE_ID, [SAVE_TID])), [LINK_TID, SAVE_TID]);
+    const empty = openMenu(env, MORE_ID, []);
+    assert.equal(linkItems(empty).length, 0);
+    const save = menuItem(env, SAVE_TID);
+    empty.append(save);
+    env.observers.at(-1).added(save);
+    assert.deepEqual(menuTids(empty), [LINK_TID, SAVE_TID]);
+});
+
+test('leaves alone the menus that do not belong to a message toolbar', () => {
+    const env = environment();
+    const reminder = fakeElement(env, 'div', {role: 'menuitem'});
+    reminder.id = 'reminder-menu';
+    const elsewhere = fakeElement(env, 'a', {'data-tid': 'message-actions-more'});
+    elsewhere.id = 'other-more';
+    env.document.body.append(reminder, elsewhere);
+    assert.equal(linkItems(openMenu(env, 'reminder-menu')).length, 0);
+    assert.equal(linkItems(openMenu(env, 'other-more')).length, 0);
+    assert.equal(linkItems(openMenu(env, 'missing')).length, 0);
+});
+
+test('copies the command that reads the message of the menu, then closes the menu', async () => {
+    const env = environment();
+    const item = menuLink(env);
+    const initial = linkState(item);
+    const event = await clickLink(item);
     assert.equal(event.defaultPrevented && event.propagationStopped, true);
     assert.deepEqual(env.copied, [`python3 '__TEAMS_GRAPH_SCRIPT__' read '${CHAT_ID}' --message ${MESSAGE_ID}`]);
-    assert.deepEqual([linkState(button).label, linkState(button).title], ['Lien copié', 'Lien copié']);
-    assert.notEqual(linkState(button).icon, initial.icon);
-    assert.deepEqual(env.timers.map(timer => timer.delay), [1500]);
+    assert.deepEqual([linkState(item).text, linkState(item).title], ['Lien copié', 'Lien copié']);
+    assert.notEqual(linkState(item).icon, initial.icon);
+    assert.deepEqual(env.timers.map(timer => timer.delay), [600]);
+    assert.equal(item.events, undefined);
     env.expire();
-    assert.deepEqual(linkState(button), initial);
+    assert.deepEqual(plain(item.events), [{type: 'keydown', key: 'Escape', bubbles: true}]);
+    assert.equal(env.copied.length, 1);
+});
+
+test('copies the command from the keyboard with Enter or Space only', async () => {
+    const env = environment();
+    const item = menuLink(env);
+    const press = async key => {
+        const event = {key, currentTarget: item, prevented: false, preventDefault() { this.prevented = true; }, stopPropagation() {}};
+        item.listeners.keydown.forEach(listener => listener(event));
+        await new Promise(setImmediate);
+        return event.prevented;
+    };
+    assert.equal(await press('ArrowDown'), false);
+    assert.deepEqual(env.copied, []);
+    assert.equal(await press('Enter'), true);
+    assert.equal(await press(' '), true);
+    assert.equal(env.copied.length, 2);
 });
 
 test('falls back to the displayed conversation and quotes it for the shell', async () => {
     const conversationId = "19:it's@thread.v2";
     const env = environment({elements: [threadElement(conversationId, 'Chat')]});
-    await clickLink(messageActions(env, `${MESSAGE_ID}-popover-surface`, {convId: 'not-a-thread'}).more.previousElementSibling);
+    await clickLink(menuLink(env, `${MESSAGE_ID}-popover-surface`, {convId: 'not-a-thread'}));
     assert.deepEqual(env.copied, [`python3 '__TEAMS_GRAPH_SCRIPT__' read '19:it'\\''s@thread.v2' --message ${MESSAGE_ID}`]);
 });
 
-test('shows why the link could not be copied', async () => {
+test('shows in the menu why the link could not be copied', async () => {
     const failures = [
         [environment(), 'menu-popover-surface', {convId: CHAT_ID}, 'message introuvable'],
         [environment(), `${MESSAGE_ID}-popover-surface`, {}, 'No Teams conversation with a compose box is displayed'],
         [environment({clipboardError: 'Document is not focused.'}), `${MESSAGE_ID}-popover-surface`, {convId: CHAT_ID}, 'Document is not focused.'],
     ];
     for (const [env, surfaceId, props, reason] of failures) {
-        const button = messageActions(env, surfaceId, props).more.previousElementSibling;
-        await clickLink(button);
-        assert.deepEqual([linkState(button).label, linkState(button).title], [`Copie impossible : ${reason}`, `Copie impossible : ${reason}`]);
+        const item = menuLink(env, surfaceId, props);
+        await clickLink(item);
+        assert.deepEqual([linkState(item).text, linkState(item).title], [`Copie impossible\u00A0: ${reason}`, `Copie impossible\u00A0: ${reason}`]);
         assert.deepEqual(env.copied, []);
         assert.deepEqual(env.timers, []);
     }
+    const env = environment();
+    const {surface} = messageActions(env);
+    const item = linkItems(openMenu(env))[0];
+    surface.remove();
+    await clickLink(item);
+    assert.equal(linkState(item).text, 'Copie impossible\u00A0: message introuvable');
 });
 
-test('replaces the previous message link observer and equips open toolbars on every evaluation', () => {
+test('replaces the previous message link observer and equips open menus on every evaluation', () => {
     const env = environment();
     const previous = env.observers.at(-1);
-    const {more} = messageActions(env);
-    more.previousElementSibling.remove();
+    messageActions(env);
+    const menu = openMenu(env);
+    linkItems(menu)[0].remove();
     const observers = [];
     vm.runInContext(source, vm.createContext(Object.assign(Object.create(null), {
         window: env.window, document: env.document, localStorage: {length: 0}, Date, Node: {ELEMENT_NODE},
@@ -782,7 +878,7 @@ test('replaces the previous message link observer and equips open toolbars on ev
     })));
     assert.equal(previous.disconnected, true);
     assert.equal(env.window.__teamsAssistantMessageLinkObserver, observers[0]);
-    assert.equal(more.previousElementSibling.getAttribute('data-tid'), 'message-actions-assistant-link');
+    assert.deepEqual(menuTids(menu), [COPY_LINK_TID, LINK_TID, SAVE_TID]);
 });
 
 function member(userId, displayName, tenantId = 'tenant-id') {

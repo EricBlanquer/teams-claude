@@ -42,7 +42,14 @@
     var TEAMS_GRAPH_SCRIPT = "__TEAMS_GRAPH_SCRIPT__";
     var MESSAGE_ACTIONS_SELECTOR = '[data-tid="message-actions-container"]';
     var MORE_ACTIONS_SELECTOR = '[data-tid="message-actions-more"]';
-    var BUTTON_ICON_SELECTOR = '.fui-Button__icon';
+    var MENU_SELECTOR = '[role="menu"]';
+    var MENU_ITEM_ROLE = 'menuitem';
+    var MENU_ITEM_SELECTOR = '[role="' + MENU_ITEM_ROLE + '"]';
+    var COPY_LINK_SELECTOR = '[data-tid="message-actions-copy-link"]';
+    var MENU_ITEM_ICON_CLASS = 'fui-MenuItem__icon';
+    var MENU_ITEM_CONTENT_CLASS = 'fui-MenuItem__content';
+    var MENU_CLOSE_KEY = 'Escape';
+    var MENU_ACTIVATION_KEYS = ['Enter', ' '];
     var MESSAGE_LINK_TID = 'message-actions-assistant-link';
     var MESSAGE_LINK_OBSERVER = '__teamsAssistantMessageLinkObserver';
     var POPOVER_SURFACE_SUFFIX = '-popover-surface';
@@ -52,7 +59,7 @@
     var MESSAGE_LINK_LABEL = 'Copier le lien pour Claude';
     var MESSAGE_LINK_COPIED = 'Lien copié';
     var MESSAGE_LINK_FAILED = 'Copie impossible\u00A0: ';
-    var MESSAGE_LINK_FEEDBACK_MS = 1500;
+    var MESSAGE_LINK_FEEDBACK_MS = 600;
     var SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
     var ICON_VIEW_BOX = '0 0 20 20';
     var LINK_ICON_PATH = 'M8.5 6.5H6a3.5 3.5 0 0 0 0 7h2.5M11.5 6.5H14a3.5 3.5 0 0 1 0 7h-2.5M7 10h6';
@@ -1047,33 +1054,47 @@
         return 'python3 ' + shellQuote(TEAMS_GRAPH_SCRIPT) + ' read ' + shellQuote(conversationId) + ' --message ' + messageId;
     }
 
-    function showLinkState(button, path, label) {
-        button.querySelector('path').setAttribute('d', path);
-        button.setAttribute('aria-label', label);
-        button.title = label;
+    function showLinkState(item, path, label) {
+        item.querySelector('path').setAttribute('d', path);
+        item.querySelector('.' + MENU_ITEM_CONTENT_CLASS).textContent = label;
+        item.title = label;
+    }
+
+    function menuMessageActions(menu) {
+        var trigger = menu ? document.getElementById(menu.getAttribute('aria-labelledby')) : null;
+        return trigger && trigger.matches(MORE_ACTIONS_SELECTOR) ? trigger.closest(MESSAGE_ACTIONS_SELECTOR) : null;
     }
 
     async function copyMessageLink(event) {
         event.preventDefault();
         event.stopPropagation();
-        var button = event.currentTarget;
+        var item = event.currentTarget;
         try {
-            await navigator.clipboard.writeText(messageReadCommand(button.closest(MESSAGE_ACTIONS_SELECTOR)));
-            showLinkState(button, COPIED_ICON_PATH, MESSAGE_LINK_COPIED);
-            setTimeout(function() { showLinkState(button, LINK_ICON_PATH, MESSAGE_LINK_LABEL); }, MESSAGE_LINK_FEEDBACK_MS);
+            await navigator.clipboard.writeText(messageReadCommand(menuMessageActions(item.closest(MENU_SELECTOR))));
+            showLinkState(item, COPIED_ICON_PATH, MESSAGE_LINK_COPIED);
+            setTimeout(function() { item.dispatchEvent(new KeyboardEvent('keydown', {key: MENU_CLOSE_KEY, bubbles: true})); }, MESSAGE_LINK_FEEDBACK_MS);
         } catch (ex) {
-            showLinkState(button, FAILED_ICON_PATH, MESSAGE_LINK_FAILED + (ex && ex.message ? ex.message : String(ex)));
+            showLinkState(item, FAILED_ICON_PATH, MESSAGE_LINK_FAILED + (ex && ex.message ? ex.message : String(ex)));
         }
     }
 
-    function messageLinkButton(more) {
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.className = more.className;
-        button.setAttribute('data-tid', MESSAGE_LINK_TID);
+    function activateMessageLink(event) {
+        if (MENU_ACTIVATION_KEYS.includes(event.key)) copyMessageLink(event);
+    }
+
+    function templateClass(template, className) {
+        var part = template.querySelector('.' + className);
+        return part ? part.className : className;
+    }
+
+    function messageLinkItem(template) {
+        var item = document.createElement('div');
+        item.setAttribute('role', MENU_ITEM_ROLE);
+        item.setAttribute('tabindex', '0');
+        item.className = template.className;
+        item.setAttribute('data-tid', MESSAGE_LINK_TID);
         var icon = document.createElement('span');
-        var moreIcon = more.querySelector(BUTTON_ICON_SELECTOR);
-        if (moreIcon) icon.className = moreIcon.className;
+        icon.className = templateClass(template, MENU_ITEM_ICON_CLASS);
         var svg = document.createElementNS(SVG_NAMESPACE, 'svg');
         svg.setAttribute('width', '1em');
         svg.setAttribute('height', '1em');
@@ -1085,18 +1106,26 @@
         svg.setAttribute('aria-hidden', 'true');
         svg.append(document.createElementNS(SVG_NAMESPACE, 'path'));
         icon.append(svg);
-        button.append(icon);
-        showLinkState(button, LINK_ICON_PATH, MESSAGE_LINK_LABEL);
-        button.addEventListener('click', copyMessageLink);
-        return button;
+        var content = document.createElement('span');
+        content.className = templateClass(template, MENU_ITEM_CONTENT_CLASS);
+        item.append(icon, content);
+        showLinkState(item, LINK_ICON_PATH, MESSAGE_LINK_LABEL);
+        item.addEventListener('click', copyMessageLink);
+        item.addEventListener('keydown', activateMessageLink);
+        return item;
     }
 
-    function addMessageLinkButtons(root) {
-        var anchors = root.matches(MORE_ACTIONS_SELECTOR) ? [root] : Array.from(root.querySelectorAll(MORE_ACTIONS_SELECTOR));
-        anchors.forEach(function(more) {
-            var previous = more.previousElementSibling;
-            if (!more.closest(MESSAGE_ACTIONS_SELECTOR) || (previous && previous.getAttribute('data-tid') === MESSAGE_LINK_TID)) return;
-            more.before(messageLinkButton(more));
+    function addMessageLinkItems(root) {
+        var enclosing = root.closest(MENU_SELECTOR);
+        var menus = enclosing ? [enclosing] : Array.from(root.querySelectorAll(MENU_SELECTOR));
+        menus.forEach(function(menu) {
+            if (!menuMessageActions(menu) || menu.querySelector('[data-tid="' + MESSAGE_LINK_TID + '"]')) return;
+            var copyLink = menu.querySelector(COPY_LINK_SELECTOR);
+            var template = copyLink || menu.querySelector(MENU_ITEM_SELECTOR);
+            if (!template) return;
+            var item = messageLinkItem(template);
+            if (copyLink) copyLink.after(item);
+            else template.before(item);
         });
     }
 
@@ -1105,13 +1134,13 @@
         var observer = new MutationObserver(function(records) {
             records.forEach(function(record) {
                 Array.from(record.addedNodes).forEach(function(node) {
-                    if (node.nodeType === Node.ELEMENT_NODE) addMessageLinkButtons(node);
+                    if (node.nodeType === Node.ELEMENT_NODE) addMessageLinkItems(node);
                 });
             });
         });
         observer.observe(document.body, {childList: true, subtree: true});
         window[MESSAGE_LINK_OBSERVER] = observer;
-        addMessageLinkButtons(document.body);
+        addMessageLinkItems(document.body);
     }
 
     installPromptCapture();
